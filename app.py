@@ -543,5 +543,9 @@ if __name__ == '__main__':
     print("=" * 50)
     print("访问地址: http://localhost:5000")
     print("按 Ctrl+C 退出")
-    print("=" * 50)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+
+# 支持Render部署
+import os
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
