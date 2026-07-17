@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>安装公司人员信息管理系统</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Microsoft YaHei', '微软雅黑', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            background: white;
+            border-radius: 15px;
+            padding: 20px 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header h1 {
+            color: #333;
+            font-size: 24px;
+        }
+        
+        .header-actions {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-success {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+        }
+        
+        .btn-danger {
+            background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+            color: white;
+        }
+        
+        .btn-info {
+            background: linear-gradient(135deg, #00b4db 0%, #0083b0 100%);
+            color: white;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .stat-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .stat-card .number {
+            font-size: 36px;
+            font-weight: bold;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .stat-card .label {
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        .panel {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        
+        .panel-full {
+            grid-column: 1 / -1;
+        }
+        
+        .panel h2 {
+            color: #333;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .search-bar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .search-bar input, .search-bar select {
+            padding: 10px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            flex: 1;
+            min-width: 150px;
+        }
+        
+        .search-bar input:focus, .search-bar select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .table-container {
+            overflow-x: auto;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        
+        th {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px;
+            text-align: left;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        tr:hover {
+            background: #f5f5f5;
+            cursor: pointer;
+        }
+        
+        tr.selected {
+            background: #e3f2fd;
+        }
+        
+        .category-badge {
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .badge-formal {
+            background: #e3f2fd;
+            color: #1976d2;
+        }
+        
+        .badge-c1 {
+            background: #e8f5e9;
+            color: #388e3c;
+        }
+        
+        .badge-c2 {
+            background: #fff3e0;
+            color: #f57c00;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .modal.active {
+            display: flex;
+        }
+        
+        .modal-content {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        
+        .modal-content h2 {
+            margin-bottom: 20px;
+            color: #333;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #666;
+            font-weight: 500;
+        }
+        
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 10px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+        
+        .detail-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        .detail-item {
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+        
+        .detail-item .label {
+            font-size: 12px;
+            color: #999;
+            margin-bottom: 5px;
+        }
+        
+        .detail-item .value {
+            font-size: 16px;
+            color: #333;
+            font-weight: 500;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .tab {
+            padding: 8px 16px;
+            background: #f0f0f0;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .tab.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 15px 25px;
+            background: #333;
+            color: white;
+            border-radius: 8px;
+            z-index: 2000;
+            display: none;
+        }
+        
+        .toast.show {
+            display: block;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+            
+            .detail-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <div class="header">
+            <h1>👥 安装公司人员信息管理系统</h1>
+            <div class="header-actions">
+                <button class="btn btn-info" onclick="exportExcel()">📥 导出Excel</button>
+                <button class="btn btn-success" onclick="showAddModal()">➕ 新增人员</button>
+                <button class="btn btn-primary" onclick="document.getElementById('importFile').click()">📤 导入数据</button>
+                <input type="file" id="importFile" accept=".xlsx" style="display:none" onchange="importExcel(this)">
+            </div>
+        </div>
+        
+        <!-- 统计卡片 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="number" id="stat-total">0</div>
+                <div class="label">总人数</div>
+            </div>
+            <div class="stat-card">
+                <div class="number" id="stat-formal">0</div>
+                <div class="label">正式职工</div>
+            </div>
+            <div class="stat-card">
+                <div class="number" id="stat-outsourced">0</div>
+                <div class="label">劳务外包</div>
+            </div>
+            <div class="stat-card">
+                <div class="number" id="stat-c1">0</div>
+                <div class="label">C1类人员</div>
+            </div>
+            <div class="stat-card">
+                <div class="number" id="stat-c2">0</div>
+                <div class="label">C2类人员</div>
+            </div>
+        </div>
+        
+        <!-- 主内容 -->
+        <div class="main-content">
+            <!-- 人员列表 -->
+            <div class="panel panel-full">
+                <h2>📋 人员列表</h2>
+                
+                <div class="search-bar">
+                    <input type="text" id="searchInput" placeholder="🔍 搜索姓名、岗位、项目..." onkeyup="filterData()">
+                    <select id="categoryFilter" onchange="filterData()">
+                        <option value="all">全部人员</option>
+                        <option value="formal">正式职工</option>
+                        <option value="outsourced">劳务外包</option>
+                        <option value="C1">C1类</option>
+                        <option value="C2">C2类</option>
+                    </select>
+                    <button class="btn btn-primary" onclick="filterData()">搜索</button>
+                </div>
+                
+                <div class="table-container">
+                    <table id="personnelTable">
+                        <thead>
+                            <tr>
+                                <th>序号</th>
+                                <th>姓名</th>
+                                <th>性别</th>
+                                <th>分类</th>
+                                <th>岗位</th>
+                                <th>学历</th>
+                                <th>联系方式</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="personnelBody">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- 统计图表 -->
+            <div class="panel">
+                <h2>📊 人员构成</h2>
+                <div class="chart-container">
+                    <canvas id="categoryChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <h2>📊 学历分布</h2>
+                <div class="chart-container">
+                    <canvas id="eduChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 新增/编辑模态框 -->
+    <div class="modal" id="personModal">
+        <div class="modal-content">
+            <h2 id="modalTitle">新增人员</h2>
+            <form id="personForm">
+                <input type="hidden" id="personId">
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>姓名 *</label>
+                        <input type="text" id="name" required>
+                    </div>
+                    <div class="form-group">
+                        <label>性别</label>
+                        <select id="gender">
+                            <option value="男">男</option>
+                            <option value="女">女</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>人员分类 *</label>
+                        <select id="category" required>
+                            <option value="正式职工">正式职工</option>
+                            <option value="C1">C1类外包</option>
+                            <option value="C2">C2类外包</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>学历</label>
+                        <select id="edu">
+                            <option value="本科">本科</option>
+                            <option value="大专">大专</option>
+                            <option value="专科">专科</option>
+                            <option value="高中">高中</option>
+                            <option value="中专">中专</option>
+                            <option value="初中">初中</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>身份证号</label>
+                        <input type="text" id="id_card" maxlength="18">
+                    </div>
+                    <div class="form-group">
+                        <label>出生日期</label>
+                        <input type="text" id="birth" placeholder="如：1990.01">
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>籍贯</label>
+                        <input type="text" id="hometown">
+                    </div>
+                    <div class="form-group">
+                        <label>联系方式</label>
+                        <input type="text" id="phone" maxlength="11">
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>岗位/职务</label>
+                        <input type="text" id="position">
+                    </div>
+                    <div class="form-group">
+                        <label>所属项目/后台</label>
+                        <input type="text" id="project">
+                    </div>
+                </div>
+                
+                <div class="form-group" id="salaryGroup">
+                    <label>最低保障工资</label>
+                    <input type="number" id="salary">
+                </div>
+                
+                <div class="modal-actions">
+                    <button type="button" class="btn" onclick="closeModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- 详情模态框 -->
+    <div class="modal" id="detailModal">
+        <div class="modal-content">
+            <h2>👤 人员详情</h2>
+            <div class="detail-grid" id="detailContent">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-info" onclick="editFromDetail()">编辑</button>
+                <button class="btn" onclick="closeDetailModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 提示框 -->
+    <div class="toast" id="toast"></div>
+    
+    <script>
+        let allData = [];
+        let currentPersonId = null;
+        let categoryChart = null;
+        let eduChart = null;
+        
+        // 页面加载时获取数据
+        document.addEventListener('DOMContentLoaded', function() {
+            loadData();
+            loadStatistics();
+        });
+        
+        // 加载人员数据
+        async function loadData() {
+            try {
+                const response = await fetch('/api/personnel');
+                allData = await response.json();
+                renderTable(allData);
+            } catch (error) {
+                showToast('加载数据失败', 'error');
+            }
+        }
+        
+        // 加载统计数据
+        async function loadStatistics() {
+            try {
+                const response = await fetch('/api/statistics');
+                const stats = await response.json();
+                
+                document.getElementById('stat-total').textContent = stats.total;
+                document.getElementById('stat-formal').textContent = stats.formal_count;
+                document.getElementById('stat-outsourced').textContent = stats.outsourced_count;
+                document.getElementById('stat-c1').textContent = stats.c1_count;
+                document.getElementById('stat-c2').textContent = stats.c2_count;
+                
+                renderCharts(stats);
+            } catch (error) {
+                console.error('加载统计失败:', error);
+            }
+        }
+        
+        // 渲染图表
+        function renderCharts(stats) {
+            // 人员构成饼图
+            const ctx1 = document.getElementById('categoryChart').getContext('2d');
+            if (categoryChart) categoryChart.destroy();
+            categoryChart = new Chart(ctx1, {
+                type: 'doughnut',
+                data: {
+                    labels: ['正式职工', 'C1类外包', 'C2类外包'],
+                    datasets: [{
+                        data: [stats.formal_count, stats.c1_count, stats.c2_count],
+                        backgroundColor: ['#667eea', '#38ef7d', '#f45c43'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+            
+            // 学历分布柱状图
+            const ctx2 = document.getElementById('eduChart').getContext('2d');
+            if (eduChart) eduChart.destroy();
+            const eduLabels = Object.keys(stats.edu);
+            const eduData = Object.values(stats.edu);
+            eduChart = new Chart(ctx2, {
+                type: 'bar',
+                data: {
+                    labels: eduLabels,
+                    datasets: [{
+                        label: '人数',
+                        data: eduData,
+                        backgroundColor: '#667eea',
+                        borderRadius: 5
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                stepSize: 1
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // 渲染表格
+        function renderTable(data) {
+            const tbody = document.getElementById('personnelBody');
+            tbody.innerHTML = '';
+            
+            data.forEach((person, index) => {
+                const tr = document.createElement('tr');
+                tr.onclick = () => showDetail(person.id);
+                
+                let badgeClass = 'badge-formal';
+                let categoryText = '正式职工';
+                if (person.category === 'C1') {
+                    badgeClass = 'badge-c1';
+                    categoryText = 'C1类';
+                } else if (person.category === 'C2') {
+                    badgeClass = 'badge-c2';
+                    categoryText = 'C2类';
+                }
+                
+                tr.innerHTML = `
+                    <td>${index + 1}</td>
+                    <td><strong>${person.name}</strong></td>
+                    <td>${person.gender}</td>
+                    <td><span class="category-badge ${badgeClass}">${categoryText}</span></td>
+                    <td>${person.position || '-'}</td>
+                    <td>${person.edu || '-'}</td>
+                    <td>${person.phone || '-'}</td>
+                    <td>
+                        <button class="btn btn-primary" style="padding:5px 10px;font-size:12px" onclick="event.stopPropagation();editPerson('${person.id}')">编辑</button>
+                        <button class="btn btn-danger" style="padding:5px 10px;font-size:12px" onclick="event.stopPropagation();deletePerson('${person.id}')">删除</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+        
+        // 筛选数据
+        function filterData() {
+            const search = document.getElementById('searchInput').value.toLowerCase();
+            const category = document.getElementById('categoryFilter').value;
+            
+            let filtered = allData;
+            
+            if (category === 'formal') {
+                filtered = filtered.filter(p => p.category === '正式职工');
+            } else if (category === 'outsourced') {
+                filtered = filtered.filter(p => p.category !== '正式职工');
+            } else if (category === 'C1') {
+                filtered = filtered.filter(p => p.category === 'C1');
+            } else if (category === 'C2') {
+                filtered = filtered.filter(p => p.category === 'C2');
+            }
+            
+            if (search) {
+                filtered = filtered.filter(p => 
+                    p.name.toLowerCase().includes(search) ||
+                    (p.position && p.position.toLowerCase().includes(search)) ||
+                    (p.project && p.project.toLowerCase().includes(search)) ||
+                    (p.hometown && p.hometown.toLowerCase().includes(search))
+                );
+            }
+            
+            renderTable(filtered);
+        }
+        
+        // 显示新增模态框
+        function showAddModal() {
+            document.getElementById('modalTitle').textContent = '新增人员';
+            document.getElementById('personForm').reset();
+            document.getElementById('personId').value = '';
+            currentPersonId = null;
+            document.getElementById('personModal').classList.add('active');
+        }
+        
+        // 编辑人员
+        async function editPerson(id) {
+            try {
+                const response = await fetch(`/api/personnel/${id}`);
+                const person = await response.json();
+                
+                document.getElementById('modalTitle').textContent = '编辑人员';
+                document.getElementById('personId').value = person.id;
+                document.getElementById('name').value = person.name;
+                document.getElementById('gender').value = person.gender;
+                document.getElementById('category').value = person.category;
+                document.getElementById('edu').value = person.edu || '';
+                document.getElementById('id_card').value = person.id_card || '';
+                document.getElementById('birth').value = person.birth || '';
+                document.getElementById('hometown').value = person.hometown || '';
+                document.getElementById('phone').value = person.phone || '';
+                document.getElementById('position').value = person.position || '';
+                document.getElementById('project').value = person.project || '';
+                document.getElementById('salary').value = person.salary || '';
+                
+                currentPersonId = id;
+                document.getElementById('personModal').classList.add('active');
+            } catch (error) {
+                showToast('获取人员信息失败', 'error');
+            }
+        }
+        
+        // 关闭模态框
+        function closeModal() {
+            document.getElementById('personModal').classList.remove('active');
+        }
+        
+        // 提交表单
+        document.getElementById('personForm').onsubmit = async function(e) {
+            e.preventDefault();
+            
+            const data = {
+                name: document.getElementById('name').value,
+                gender: document.getElementById('gender').value,
+                category: document.getElementById('category').value,
+                edu: document.getElementById('edu').value,
+                id_card: document.getElementById('id_card').value,
+                birth: document.getElementById('birth').value,
+                hometown: document.getElementById('hometown').value,
+                phone: document.getElementById('phone').value,
+                position: document.getElementById('position').value,
+                project: document.getElementById('project').value,
+                salary: document.getElementById('salary').value
+            };
+            
+            try {
+                let response;
+                if (currentPersonId) {
+                    response = await fetch(`/api/personnel/${currentPersonId}`, {
+                        method: 'PUT',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(data)
+                    });
+                } else {
+                    response = await fetch('/api/personnel', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(data)
+                    });
+                }
+                
+                const result = await response.json();
+                if (result.success) {
+                    showToast(currentPersonId ? '更新成功' : '添加成功');
+                    closeModal();
+                    loadData();
+                    loadStatistics();
+                } else {
+                    showToast(result.error || '操作失败', 'error');
+                }
+            } catch (error) {
+                showToast('操作失败', 'error');
+            }
+        };
+        
+        // 显示详情
+        async function showDetail(id) {
+            try {
+                const response = await fetch(`/api/personnel/${id}`);
+                const person = await response.json();
+                
+                let categoryText = '正式职工';
+                if (person.category === 'C1') categoryText = 'C1类外包';
+                if (person.category === 'C2') categoryText = 'C2类外包';
+                
+                const content = document.getElementById('detailContent');
+                content.innerHTML = `
+                    <div class="detail-item">
+                        <div class="label">姓名</div>
+                        <div class="value">${person.name}</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="label">性别</div>
+                        <div class="value">${person.gender}</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="label">分类</div>
+                        <div class="value">${categoryText}</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="label">学历</div>
+                        <div class="value">${person.edu || '-'}</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="label">身份证号</div>
+                        <div class="value">${person.id_card || '-'}</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="label">出生日期</div>
+                        <div class="value">${person.birth || '-'}</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="label">籍贯</div>
+                        <div class="value">${person.hometown || '-'}</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="label">联系方式</div>
+                        <div class="value">${person.phone || '-'}</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="label">岗位/职务</div>
+                        <div class="value">${person.position || '-'}</div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="label">所属项目</div>
+                        <div class="value">${person.project || '-'}</div>
+                    </div>
+                    ${person.salary ? `
+                    <div class="detail-item">
+                        <div class="label">最低保障工资</div>
+                        <div class="value">${person.salary}元</div>
+                    </div>
+                    ` : ''}
+                `;
+                
+                currentPersonId = id;
+                document.getElementById('detailModal').classList.add('active');
+            } catch (error) {
+                showToast('获取详情失败', 'error');
+            }
+        }
+        
+        // 关闭详情模态框
+        function closeDetailModal() {
+            document.getElementById('detailModal').classList.remove('active');
+        }
+        
+        // 从详情页编辑
+        function editFromDetail() {
+            closeDetailModal();
+            editPerson(currentPersonId);
+        }
+        
+        // 删除人员
+        async function deletePerson(id) {
+            if (!confirm('确定要删除该人员吗？')) return;
+            
+            try {
+                const response = await fetch(`/api/personnel/${id}`, {method: 'DELETE'});
+                const result = await response.json();
+                
+                if (result.success) {
+                    showToast('删除成功');
+                    loadData();
+                    loadStatistics();
+                } else {
+                    showToast(result.error || '删除失败', 'error');
+                }
+            } catch (error) {
+                showToast('删除失败', 'error');
+            }
+        }
+        
+        // 导出Excel
+        function exportExcel() {
+            window.location.href = '/api/export';
+        }
+        
+        // 导入Excel
+        async function importExcel(input) {
+            const file = input.files[0];
+            if (!file) return;
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                const response = await fetch('/api/import', {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await response.json();
+                
+                if (result.success) {
+                    showToast('导入成功');
+                    loadData();
+                    loadStatistics();
+                } else {
+                    showToast(result.error || '导入失败', 'error');
+                }
+            } catch (error) {
+                showToast('导入失败', 'error');
+            }
+            
+            input.value = '';
+        }
+        
+        // 显示提示
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.style.background = type === 'error' ? '#f45c43' : '#333';
+            toast.classList.add('show');
+            
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
