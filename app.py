@@ -204,7 +204,9 @@ def load_personnel_data():
                     'project': ws.cell(r, 9).value or '未分配',
                     'phone': str(ws.cell(r, 10).value or ''),
                     'cert': ws.cell(r, 11).value or '',
-                    'category': '正式职工'
+                    'category': '正式职工',
+                    'status': ws.cell(r, 12).value or '在岗',
+                    'status_detail': ws.cell(r, 13).value or ''
                 }
                 result['formal'].append(person)
     
@@ -240,17 +242,11 @@ def load_personnel_data():
                     'category': current_category,
                     'phone': str(ws.cell(r, 11).value or ''),
                     'project': project,
-                    'cert': cert
+                    'cert': cert,
+                    'status': ws.cell(r, 14).value or '在岗',
+                    'status_detail': ws.cell(r, 15).value or ''
                 }
                 result['outsourced'].append(person)
-    
-    # 附加状态信息
-    status_data = load_status()
-    for group in ['formal', 'outsourced']:
-        for p in result[group]:
-            s = status_data.get(p['id'], {'status': '在岗', 'detail': ''})
-            p['status'] = s['status']
-            p['status_detail'] = s['detail']
     
     return result
 
@@ -747,11 +743,25 @@ def update_person_status(person_id):
     status_val = data.get('status', '在岗')
     detail = data.get('detail', '')
     
-    status_data = load_status()
-    status_data[person_id] = {'status': status_val, 'detail': detail}
-    save_status(status_data)
+    # 保存到Excel
+    wb = openpyxl.load_workbook(ROSTER_FILE)
     
-    return jsonify({'success': True, 'status': status_data[person_id]})
+    if person_id.startswith('F'):
+        ws = wb['正式职工']
+        row_idx = int(person_id[1:]) + 2
+        if row_idx <= ws.max_row:
+            ws.cell(row_idx, 12, status_val)
+            ws.cell(row_idx, 13, detail)
+    else:
+        ws = wb['劳务外包人员']
+        row_idx = int(person_id[1:]) + 2
+        if row_idx <= ws.max_row:
+            ws.cell(row_idx, 14, status_val)
+            ws.cell(row_idx, 15, detail)
+    
+    wb.save(ROSTER_FILE)
+    
+    return jsonify({'success': True, 'status': {'status': status_val, 'detail': detail}})
 
 # ============= 休假申请API =============
 
@@ -891,9 +901,22 @@ def reject_trip(record_id):
 @app.route('/api/personnel/<person_id>/return', methods=['PUT'])
 def person_return(person_id):
     """人员归队/销假，恢复在岗状态"""
-    status_data = load_status()
-    status_data[person_id] = {'status': '在岗', 'detail': ''}
-    save_status(status_data)
+    wb = openpyxl.load_workbook(ROSTER_FILE)
+    
+    if person_id.startswith('F'):
+        ws = wb['正式职工']
+        row_idx = int(person_id[1:]) + 2
+        if row_idx <= ws.max_row:
+            ws.cell(row_idx, 12, '在岗')
+            ws.cell(row_idx, 13, '')
+    else:
+        ws = wb['劳务外包人员']
+        row_idx = int(person_id[1:]) + 2
+        if row_idx <= ws.max_row:
+            ws.cell(row_idx, 14, '在岗')
+            ws.cell(row_idx, 15, '')
+    
+    wb.save(ROSTER_FILE)
     return jsonify({'success': True})
 
 # ============= 登录API =============
