@@ -21,13 +21,134 @@ CORS(app)
 
 # 数据文件路径
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
-ROSTER_FILE = os.path.join(DATA_DIR, 'personnel.xlsx')
-TRANSFER_FILE = os.path.join(DATA_DIR, 'transfers.xlsx')
+ROSTER_FILE = os.path.join(DATA_DIR, '安装公司最新人员花名册.xlsx')
+TRANSFER_FILE = os.path.join(DATA_DIR, '人员调动记录.xlsx')
+STATUS_FILE = os.path.join(DATA_DIR, '人员状态.json')
+LEAVE_FILE = os.path.join(DATA_DIR, '休假申请表.xlsx')
+TRIP_FILE = os.path.join(DATA_DIR, '出差单.xlsx')
 
 def ensure_data_dir():
     """确保数据目录存在"""
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
+
+# ============= 状态管理 =============
+
+def load_status():
+    """加载人员状态"""
+    if not os.path.exists(STATUS_FILE):
+        return {}
+    with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def save_status(status_data):
+    """保存人员状态"""
+    ensure_data_dir()
+    with open(STATUS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(status_data, f, ensure_ascii=False, indent=2)
+
+def get_person_status(person_id):
+    """获取人员当前状态"""
+    status = load_status()
+    return status.get(person_id, {'status': '在岗', 'detail': ''})
+
+# ============= 休假/出差记录 =============
+
+def load_leave_records():
+    """加载休假申请"""
+    if not os.path.exists(LEAVE_FILE):
+        return []
+    wb = openpyxl.load_workbook(LEAVE_FILE, data_only=True)
+    ws = wb.active
+    records = []
+    for r in range(2, ws.max_row + 1):
+        rid = ws.cell(r, 1).value
+        if rid:
+            records.append({
+                'id': rid,
+                'person_id': ws.cell(r, 2).value or '',
+                'person_name': ws.cell(r, 3).value or '',
+                'start_date': str(ws.cell(r, 4).value or ''),
+                'end_date': str(ws.cell(r, 5).value or ''),
+                'reason': ws.cell(r, 6).value or '',
+                'status': ws.cell(r, 7).value or '待审批',
+                'created_at': str(ws.cell(r, 8).value or '')
+            })
+    return records
+
+def save_leave_records(records):
+    """保存休假申请"""
+    ensure_data_dir()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = '休假申请'
+    headers = ['编号', '人员ID', '姓名', '开始日期', '结束日期', '事由', '审批状态', '申请时间']
+    for i, h in enumerate(headers, 1):
+        ws.cell(1, i, h)
+        ws.cell(1, i).font = Font(name='宋体', size=10, bold=True)
+        ws.cell(1, i).alignment = Alignment(horizontal='center', vertical='center')
+    for idx, r in enumerate(records, 2):
+        ws.cell(idx, 1, r['id'])
+        ws.cell(idx, 2, r['person_id'])
+        ws.cell(idx, 3, r['person_name'])
+        ws.cell(idx, 4, r['start_date'])
+        ws.cell(idx, 5, r['end_date'])
+        ws.cell(idx, 6, r['reason'])
+        ws.cell(idx, 7, r['status'])
+        ws.cell(idx, 8, r['created_at'])
+    for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']:
+        ws.column_dimensions[col].width = 15
+    ws.column_dimensions['F'].width = 30
+    wb.save(LEAVE_FILE)
+
+def load_trip_records():
+    """加载出差单"""
+    if not os.path.exists(TRIP_FILE):
+        return []
+    wb = openpyxl.load_workbook(TRIP_FILE, data_only=True)
+    ws = wb.active
+    records = []
+    for r in range(2, ws.max_row + 1):
+        rid = ws.cell(r, 1).value
+        if rid:
+            records.append({
+                'id': rid,
+                'person_id': ws.cell(r, 2).value or '',
+                'person_name': ws.cell(r, 3).value or '',
+                'destination': ws.cell(r, 4).value or '',
+                'start_date': str(ws.cell(r, 5).value or ''),
+                'end_date': str(ws.cell(r, 6).value or ''),
+                'reason': ws.cell(r, 7).value or '',
+                'status': ws.cell(r, 8).value or '待审批',
+                'created_at': str(ws.cell(r, 9).value or '')
+            })
+    return records
+
+def save_trip_records(records):
+    """保存出差单"""
+    ensure_data_dir()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = '出差单'
+    headers = ['编号', '人员ID', '姓名', '出差目的地', '开始日期', '结束日期', '事由', '审批状态', '申请时间']
+    for i, h in enumerate(headers, 1):
+        ws.cell(1, i, h)
+        ws.cell(1, i).font = Font(name='宋体', size=10, bold=True)
+        ws.cell(1, i).alignment = Alignment(horizontal='center', vertical='center')
+    for idx, r in enumerate(records, 2):
+        ws.cell(idx, 1, r['id'])
+        ws.cell(idx, 2, r['person_id'])
+        ws.cell(idx, 3, r['person_name'])
+        ws.cell(idx, 4, r['destination'])
+        ws.cell(idx, 5, r['start_date'])
+        ws.cell(idx, 6, r['end_date'])
+        ws.cell(idx, 7, r['reason'])
+        ws.cell(idx, 8, r['status'])
+        ws.cell(idx, 9, r['created_at'])
+    for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']:
+        ws.column_dimensions[col].width = 15
+    ws.column_dimensions['G'].width = 30
+    wb.save(TRIP_FILE)
 
 def load_personnel_data():
     """从Excel加载人员数据"""
@@ -97,7 +218,39 @@ def load_personnel_data():
                 }
                 result['outsourced'].append(person)
     
+    # 附加状态信息
+    status_data = load_status()
+    for group in ['formal', 'outsourced']:
+        for p in result[group]:
+            s = status_data.get(p['id'], {'status': '在岗', 'detail': ''})
+            p['status'] = s['status']
+            p['status_detail'] = s['detail']
+    
     return result
+
+def save_personnel_data(data):
+    """保存人员数据到Excel"""
+    ensure_data_dir()
+    wb = openpyxl.load_workbook(ROSTER_FILE)
+    
+    # 保存正式职工
+    if '正式职工' in wb.sheetnames:
+        ws = wb['正式职工']
+        for i, p in enumerate(data['formal']):
+            row = i + 3
+            ws.cell(row, 1, p.get('seq', i + 1))
+            ws.cell(row, 2, p.get('name', ''))
+            ws.cell(row, 3, p.get('gender', ''))
+            ws.cell(row, 4, p.get('id_card', ''))
+            ws.cell(row, 5, p.get('birth', ''))
+            ws.cell(row, 6, p.get('edu', ''))
+            ws.cell(row, 7, p.get('hometown', ''))
+            ws.cell(row, 8, p.get('position', ''))
+            ws.cell(row, 9, p.get('project', ''))
+            ws.cell(row, 10, p.get('phone', ''))
+            ws.cell(row, 11, p.get('cert', ''))
+    
+    wb.save(ROSTER_FILE)
 
 def load_transfer_data():
     """加载调动记录"""
@@ -475,6 +628,28 @@ def get_person_timeline(person_id):
 
 # ============= 统计相关API =============
 
+
+def map_edu_category(edu_str):
+    """将学历映射到简化分类"""
+    if not edu_str:
+        return '未知'
+    
+    edu = str(edu_str).strip()
+    
+    # 本科类
+    if any(keyword in edu for keyword in ['本科', '大学']):
+        return '本科'
+    
+    # 专科类
+    if any(keyword in edu for keyword in ['专科', '大专']):
+        return '专科'
+    
+    # 高中及以下
+    if any(keyword in edu for keyword in ['中专', '初中', '高中']):
+        return '高中及以下'
+    
+    return '未知'
+
 @app.route('/api/statistics')
 def get_statistics():
     """获取统计数据"""
@@ -496,7 +671,8 @@ def get_statistics():
     
     for p in data['formal'] + data['outsourced']:
         edu = p.get('edu', '未知')
-        stats['edu'][edu] = stats['edu'].get(edu, 0) + 1
+        edu_category = map_edu_category(edu)
+        stats['edu'][edu_category] = stats['edu'].get(edu_category, 0) + 1
     
     for p in data['formal']:
         dept = p.get('project', '未知')
@@ -515,7 +691,7 @@ def export_excel():
 def export_transfers():
     """导出调动记录"""
     if os.path.exists(TRANSFER_FILE):
-        return send_file(TRANSFER_FILE, as_attachment=True, download_name='transfers.xlsx')
+        return send_file(TRANSFER_FILE, as_attachment=True, download_name='人员调动记录.xlsx')
     return jsonify({'error': '调动记录文件不存在'}), 404
 
 @app.route('/api/import', methods=['POST'])
@@ -536,9 +712,170 @@ def import_excel():
     
     return jsonify({'success': True, 'message': '导入成功'})
 
+# ============= 状态管理API =============
 
-# 支持Render部署
-import os
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+@app.route('/api/personnel/<person_id>/status', methods=['PUT'])
+def update_person_status(person_id):
+    """更新人员状态"""
+    data = request.json
+    status_val = data.get('status', '在岗')
+    detail = data.get('detail', '')
+    
+    status_data = load_status()
+    status_data[person_id] = {'status': status_val, 'detail': detail}
+    save_status(status_data)
+    
+    return jsonify({'success': True, 'status': status_data[person_id]})
+
+# ============= 休假申请API =============
+
+@app.route('/api/leave')
+def get_leave_records():
+    """获取休假申请列表"""
+    records = load_leave_records()
+    person_id = request.args.get('person_id')
+    if person_id:
+        records = [r for r in records if r['person_id'] == person_id]
+    records.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+    return jsonify(records)
+
+@app.route('/api/leave', methods=['POST'])
+def add_leave():
+    """新增休假申请"""
+    data = request.json
+    if not data.get('person_id') or not data.get('person_name'):
+        return jsonify({'error': '人员信息不完整'}), 400
+    if not data.get('start_date') or not data.get('end_date'):
+        return jsonify({'error': '请选择休假时间'}), 400
+    
+    records = load_leave_records()
+    new_record = {
+        'id': f'L{len(records) + 1}',
+        'person_id': data['person_id'],
+        'person_name': data['person_name'],
+        'start_date': data['start_date'],
+        'end_date': data['end_date'],
+        'reason': data.get('reason', ''),
+        'status': '待审批',
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    records.append(new_record)
+    save_leave_records(records)
+    return jsonify({'success': True, 'record': new_record})
+
+@app.route('/api/leave/<record_id>/approve', methods=['PUT'])
+def approve_leave(record_id):
+    """审批休假申请"""
+    records = load_leave_records()
+    for i, r in enumerate(records):
+        if r['id'] == record_id:
+            records[i]['status'] = '已通过'
+            save_leave_records(records)
+            # 自动更新人员状态为休假
+            status_data = load_status()
+            status_data[r['person_id']] = {
+                'status': '休假',
+                'detail': f"休假至{r['end_date']}"
+            }
+            save_status(status_data)
+            return jsonify({'success': True})
+    return jsonify({'error': '未找到申请'}), 404
+
+@app.route('/api/leave/<record_id>/reject', methods=['PUT'])
+def reject_leave(record_id):
+    """驳回休假申请"""
+    records = load_leave_records()
+    for i, r in enumerate(records):
+        if r['id'] == record_id:
+            records[i]['status'] = '已驳回'
+            save_leave_records(records)
+            return jsonify({'success': True})
+    return jsonify({'error': '未找到申请'}), 404
+
+# ============= 出差单API =============
+
+@app.route('/api/trip')
+def get_trip_records():
+    """获取出差单列表"""
+    records = load_trip_records()
+    person_id = request.args.get('person_id')
+    if person_id:
+        records = [r for r in records if r['person_id'] == person_id]
+    records.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+    return jsonify(records)
+
+@app.route('/api/trip', methods=['POST'])
+def add_trip():
+    """新增出差单"""
+    data = request.json
+    if not data.get('person_id') or not data.get('person_name'):
+        return jsonify({'error': '人员信息不完整'}), 400
+    if not data.get('destination'):
+        return jsonify({'error': '请填写出差目的地'}), 400
+    if not data.get('start_date') or not data.get('end_date'):
+        return jsonify({'error': '请选择出差时间'}), 400
+    
+    records = load_trip_records()
+    new_record = {
+        'id': f'B{len(records) + 1}',
+        'person_id': data['person_id'],
+        'person_name': data['person_name'],
+        'destination': data['destination'],
+        'start_date': data['start_date'],
+        'end_date': data['end_date'],
+        'reason': data.get('reason', ''),
+        'status': '待审批',
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    records.append(new_record)
+    save_trip_records(records)
+    return jsonify({'success': True, 'record': new_record})
+
+@app.route('/api/trip/<record_id>/approve', methods=['PUT'])
+def approve_trip(record_id):
+    """审批出差"""
+    records = load_trip_records()
+    for i, r in enumerate(records):
+        if r['id'] == record_id:
+            records[i]['status'] = '已通过'
+            save_trip_records(records)
+            # 自动更新人员状态为出差
+            status_data = load_status()
+            status_data[r['person_id']] = {
+                'status': '出差',
+                'detail': f"出差-{r['destination']}"
+            }
+            save_status(status_data)
+            return jsonify({'success': True})
+    return jsonify({'error': '未找到申请'}), 404
+
+@app.route('/api/trip/<record_id>/reject', methods=['PUT'])
+def reject_trip(record_id):
+    """驳回出差"""
+    records = load_trip_records()
+    for i, r in enumerate(records):
+        if r['id'] == record_id:
+            records[i]['status'] = '已驳回'
+            save_trip_records(records)
+            return jsonify({'success': True})
+    return jsonify({'error': '未找到申请'}), 404
+
+# ============= 归队/销假API =============
+
+@app.route('/api/personnel/<person_id>/return', methods=['PUT'])
+def person_return(person_id):
+    """人员归队/销假，恢复在岗状态"""
+    status_data = load_status()
+    status_data[person_id] = {'status': '在岗', 'detail': ''}
+    save_status(status_data)
+    return jsonify({'success': True})
+
+if __name__ == '__main__':
+    ensure_data_dir()
+    print("=" * 50)
+    print("安装公司人员信息管理系统")
+    print("=" * 50)
+    print("访问地址: http://localhost:5000")
+    print("按 Ctrl+C 退出")
+    print("=" * 50)
+    app.run(host='0.0.0.0', port=5000, debug=True)
