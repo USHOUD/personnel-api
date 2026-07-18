@@ -44,12 +44,29 @@ def get_personnel():
                   or key in (p['position'] or '').lower()
                   or key in (p['project'] or '').lower()]
     
-    # 排序：后台在前，项目在后；同组内领导在前，员在后
+    # 排序规则：正式职工→C1→C2；后台在前项目在后；领导在前员在后
+    # 特定人员固定顺序
+    fixed_order = {'邱方恒': 0, '廖志成': 1, '吕亮': 2, '李强': 3}
+    
     def sort_key(p):
+        name = p['name'] or ''
+        category = p['category'] or ''
         project = p['project'] or '未分配'
         position = p['position'] or ''
         
-        # 项目优先级
+        # 1. 固定人员优先
+        if name in fixed_order:
+            return (0, 0, fixed_order[name], 0, 0, name)
+        
+        # 2. 人员类别：正式职工 > C1 > C2
+        if category == '正式职工':
+            cat_order = 0
+        elif category == 'C1':
+            cat_order = 1
+        else:
+            cat_order = 2
+        
+        # 3. 项目优先级：后台在前，项目在后
         if project == '后台':
             proj_order = 0
         elif project == '其他':
@@ -57,7 +74,7 @@ def get_personnel():
         else:
             proj_order = 1
         
-        # 职务级别
+        # 4. 职务级别：领导在前，员在后
         if any(k in position for k in ['经理', '书记']):
             if '副经理' in position or '生产副经理' in position:
                 pos_order = 1
@@ -70,7 +87,7 @@ def get_personnel():
         else:
             pos_order = 4
         
-        return (proj_order, pos_order, position)
+        return (1, cat_order, proj_order, pos_order, 0, name)
     
     people.sort(key=sort_key)
     
