@@ -44,6 +44,36 @@ def get_personnel():
                   or key in (p['position'] or '').lower()
                   or key in (p['project'] or '').lower()]
     
+    # 排序：后台在前，项目在后；同组内领导在前，员在后
+    def sort_key(p):
+        project = p['project'] or '未分配'
+        position = p['position'] or ''
+        
+        # 项目优先级
+        if project == '后台':
+            proj_order = 0
+        elif project == '其他':
+            proj_order = 999
+        else:
+            proj_order = 1
+        
+        # 职务级别
+        if any(k in position for k in ['经理', '书记']):
+            if '副经理' in position or '生产副经理' in position:
+                pos_order = 1
+            else:
+                pos_order = 0
+        elif any(k in position for k in ['部长', '高级主管']):
+            pos_order = 2
+        elif '主管' in position:
+            pos_order = 3
+        else:
+            pos_order = 4
+        
+        return (proj_order, pos_order, position)
+    
+    people.sort(key=sort_key)
+    
     # 转换为JSON格式
     result = []
     for p in people:
