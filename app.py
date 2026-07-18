@@ -26,11 +26,37 @@ TRANSFER_FILE = os.path.join(DATA_DIR, '人员调动记录.xlsx')
 STATUS_FILE = os.path.join(DATA_DIR, '人员状态.json')
 LEAVE_FILE = os.path.join(DATA_DIR, '休假申请表.xlsx')
 TRIP_FILE = os.path.join(DATA_DIR, '出差单.xlsx')
+USERS_FILE = os.path.join(DATA_DIR, 'users.json')
 
 def ensure_data_dir():
     """确保数据目录存在"""
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
+
+# ============= 用户管理 =============
+
+def load_users():
+    """加载用户数据"""
+    if not os.path.exists(USERS_FILE):
+        # 默认管理员账号
+        default_users = {
+            '18184005669': {
+                'phone': '18184005669',
+                'name': '管理员',
+                'password': '123456',
+                'is_admin': True
+            }
+        }
+        save_users(default_users)
+        return default_users
+    with open(USERS_FILE, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def save_users(users_data):
+    """保存用户数据"""
+    ensure_data_dir()
+    with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users_data, f, ensure_ascii=False, indent=2)
 
 # ============= 状态管理 =============
 
@@ -868,6 +894,81 @@ def person_return(person_id):
     status_data = load_status()
     status_data[person_id] = {'status': '在岗', 'detail': ''}
     save_status(status_data)
+    return jsonify({'success': True})
+
+# ============= 登录API =============
+
+import hashlib
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    """用户登录"""
+    data = request.json
+    phone = data.get('phone', '').strip()
+    password = data.get('password', '').strip()
+
+    if not phone or not password:
+        return jsonify({'error': '手机号和密码不能为空'}), 400
+
+    users = load_users()
+    user = users.get(phone)
+
+    if not user:
+        return jsonify({'error': '用户不存在'}), 401
+
+    if user['password'] != password:
+        return jsonify({'error': '密码错误'}), 401
+
+    # 生成简单token
+    token = hashlib.md5(f"{phone}:{password}:{datetime.now().date()}".encode()).hexdigest()
+
+    return jsonify({
+        'success': True,
+        'token': token,
+        'user': {
+            'phone': user['phone'],
+            'name': user['name'],
+            'is_admin': user.get('is_admin', False)
+        }
+    })
+
+@app.route('/api/users', methods=['GET'])
+def get_users():
+    """获取用户列表（管理员）"""
+    users = load_users()
+    result = []
+    for phone, user in users.items():
+        result.append({
+            'phone': user['phone'],
+            'name': user['name'],
+            'is_admin': user.get('is_admin', False)
+        })
+    return jsonify(result)
+
+@app.route('/api/users', methods=['POST'])
+def add_user():
+    """添加用户（管理员）"""
+    data = request.json
+    phone = data.get('phone', '').strip()
+    name = data.get('name', '').strip()
+    password = data.get('password', '123456')
+    is_admin = data.get('is_admin', False)
+
+    if not phone or not name:
+        return jsonify({'error': '手机号和姓名不能为空'}), 400
+
+    users = load_users()
+    if phone in users:
+        return jsonify({'error': '用户已存在'}), 400
+
+    users[phone] = {
+        'phone': phone,
+        'name': name,
+        'password': password,
+        'is_admin': is_admin
+    }
+    save_users(users)
+
     return jsonify({'success': True})
 
 if __name__ == '__main__':
