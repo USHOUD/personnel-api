@@ -808,12 +808,21 @@ def approve_leave(record_id):
             records[i]['status'] = '已通过'
             save_leave_records(records)
             # 自动更新人员状态为休假
-            status_data = load_status()
-            status_data[r['person_id']] = {
-                'status': '休假',
-                'detail': f"休假至{r['end_date']}"
-            }
-            save_status(status_data)
+            person_id = r['person_id']
+            wb = openpyxl.load_workbook(ROSTER_FILE)
+            if person_id.startswith('F'):
+                ws = wb['正式职工']
+                row_idx = int(person_id[1:]) + 2
+                if row_idx <= ws.max_row:
+                    ws.cell(row_idx, 12, '休假')
+                    ws.cell(row_idx, 13, f"休假至{r['end_date']}")
+            else:
+                ws = wb['劳务外包人员']
+                row_idx = int(person_id[1:]) + 2
+                if row_idx <= ws.max_row:
+                    ws.cell(row_idx, 14, '休假')
+                    ws.cell(row_idx, 15, f"休假至{r['end_date']}")
+            wb.save(ROSTER_FILE)
             return jsonify({'success': True})
     return jsonify({'error': '未找到申请'}), 404
 
@@ -876,12 +885,21 @@ def approve_trip(record_id):
             records[i]['status'] = '已通过'
             save_trip_records(records)
             # 自动更新人员状态为出差
-            status_data = load_status()
-            status_data[r['person_id']] = {
-                'status': '出差',
-                'detail': f"出差-{r['destination']}"
-            }
-            save_status(status_data)
+            person_id = r['person_id']
+            wb = openpyxl.load_workbook(ROSTER_FILE)
+            if person_id.startswith('F'):
+                ws = wb['正式职工']
+                row_idx = int(person_id[1:]) + 2
+                if row_idx <= ws.max_row:
+                    ws.cell(row_idx, 12, '出差')
+                    ws.cell(row_idx, 13, f"出差-{r['destination']}")
+            else:
+                ws = wb['劳务外包人员']
+                row_idx = int(person_id[1:]) + 2
+                if row_idx <= ws.max_row:
+                    ws.cell(row_idx, 14, '出差')
+                    ws.cell(row_idx, 15, f"出差-{r['destination']}")
+            wb.save(ROSTER_FILE)
             return jsonify({'success': True})
     return jsonify({'error': '未找到申请'}), 404
 
