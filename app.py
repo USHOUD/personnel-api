@@ -162,8 +162,12 @@ def update_person(person_id):
         values = []
         for key in ['name','gender','id_card','birth','edu','hometown','position','project','phone','cert','salary','status','status_detail']:
             if key in data:
+                val = data[key]
+                # salary空字符串转None
+                if key == 'salary' and (val == '' or val is None):
+                    val = None
                 fields.append(f"{key}=%s")
-                values.append(data[key])
+                values.append(val)
         
         if fields:
             fields.append("updated_at=NOW()")
