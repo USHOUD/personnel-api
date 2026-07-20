@@ -489,6 +489,30 @@ def get_statistics():
     cur.execute("SELECT project, COUNT(*) as c FROM personnel WHERE category='正式职工' GROUP BY project")
     dept_stats = {row['project']: row['c'] for row in cur.fetchall()}
     
+    # 证书统计
+    cur.execute("SELECT cert FROM personnel")
+    cert_stats = {'有证书': 0, '无证书': 0}
+    for row in cur.fetchall():
+        cert = row['cert']
+        if cert and cert.strip() and cert != '/':
+            cert_stats['有证书'] += 1
+        else:
+            cert_stats['无证书'] += 1
+    
+    # 一建指标
+    cur.execute("SELECT * FROM exam_targets WHERE exam_type='一建' LIMIT 1")
+    exam_row = cur.fetchone()
+    exam_target = None
+    if exam_row:
+        cur.execute("SELECT person_name FROM exam_target_persons WHERE target_id=%s ORDER BY id", (exam_row['id'],))
+        persons = [r['person_name'] for r in cur.fetchall()]
+        exam_target = {
+            'id': exam_row['id'],
+            'exam_type': exam_row['exam_type'],
+            'year': exam_row['year'],
+            'persons': persons
+        }
+    
     cur.close()
     conn.close()
     
@@ -500,10 +524,79 @@ def get_statistics():
         'c2_count': c2,
         'gender': {'male': male, 'female': female},
         'edu': edu_stats,
-        'dept': dept_stats
+        'dept': dept_stats,
+        'cert': cert_stats,
+        'exam_target': exam_target
     })
 
 # ============= 登录API =============
+
+# ============= 一建指标API =============
+
+@app.route('/api/exam-targets', methods=['GET'])
+def get_exam_targets():
+    """获取一建指标"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT * FROM exam_targets ORDER BY year DESC LIMIT 1")
+    target = cur.fetchone()
+    
+    if target:
+        cur.execute("SELECT person_name FROM exam_target_persons WHERE target_id=%s ORDER BY id", (target['id'],))
+        persons = [r['person_name'] for r in cur.fetchall()]
+        result = {
+            'id': target['id'],
+            'exam_type': target['exam_type'],
+            'year': target['year'],
+            'persons': persons
+        }
+    else:
+        result = None
+    
+    cur.close()
+    conn.close()
+    return jsonify(result)
+
+@app.route('/api/exam-targets', methods=['POST'])
+def save_exam_targets():
+    """保存一建指标"""
+    data = request.json
+    exam_type = data.get('exam_type', '一建')
+    year = data.get('year', 2026)
+    persons = data.get('persons', [])
+    
+    conn = get_db()
+    cur = conn.cursor()
+    
+    try:
+        # 查找或创建指标
+        cur.execute("SELECT id FROM exam_targets WHERE exam_type=%s AND year=%s", (exam_type, year))
+        row = cur.fetchone()
+        
+        if row:
+            target_id = row['id']
+            # 更新时间
+            cur.execute("UPDATE exam_targets SET updated_at=NOW() WHERE id=%s", (target_id,))
+            # 删除旧人员
+            cur.execute("DELETE FROM exam_target_persons WHERE target_id=%s", (target_id,))
+        else:
+            cur.execute("INSERT INTO exam_targets (exam_type, year) VALUES (%s, %s) RETURNING id", (exam_type, year))
+            target_id = cur.fetchone()['id']
+        
+        # 插入新人员
+        for name in persons:
+            cur.execute("INSERT INTO exam_target_persons (target_id, person_name) VALUES (%s, %s)", (target_id, name))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({'success': True})
+    except Exception as e:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/login', methods=['POST'])
 def login():

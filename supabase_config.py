@@ -97,6 +97,27 @@ def init_db():
     ON CONFLICT (phone) DO NOTHING;
     """)
     
+    # 一建考取指标表
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS exam_targets (
+        id SERIAL PRIMARY KEY,
+        exam_type VARCHAR(20) NOT NULL,
+        year INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(exam_type, year)
+    );
+    """)
+    
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS exam_target_persons (
+        id SERIAL PRIMARY KEY,
+        target_id INTEGER REFERENCES exam_targets(id),
+        person_name VARCHAR(50) NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+    );
+    """)
+    
     conn.commit()
     cur.close()
     conn.close()
