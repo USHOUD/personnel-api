@@ -538,6 +538,8 @@ def get_statistics():
         cert = row['cert']
         if cert and cert.strip() and cert != '/':
             total_with_cert += 1
+            # 存储"姓名-证书"格式
+            entry = f"{name}（{cert}）" if len(cert) < 30 else f"{name}（{cert[:25]}...）"
             if '一建' in cert or '一级建造师' in cert:
                 cert_stats['一建']['count'] += 1
                 cert_stats['一建']['persons'].append(name)
@@ -552,10 +554,10 @@ def get_statistics():
                 cert_stats['二造']['persons'].append(name)
             elif any(k in cert for k in ['安全员', '质量员', '施工员', '测量员', '资料员', '八大员']):
                 cert_stats['八大员']['count'] += 1
-                cert_stats['八大员']['persons'].append(name)
+                cert_stats['八大员']['persons'].append(f"{name}（{cert}）")
             else:
                 cert_stats['其他']['count'] += 1
-                cert_stats['其他']['persons'].append(name)
+                cert_stats['其他']['persons'].append(f"{name}（{cert}）")
         else:
             cert_stats['无证书']['count'] += 1
             cert_stats['无证书']['persons'].append(name)
