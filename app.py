@@ -26,15 +26,15 @@ def get_personnel():
     search = request.args.get('search', '').strip()
     
     if category == 'formal':
-        cur.execute("SELECT * FROM personnel WHERE category='正式职工' ORDER BY id")
+        cur.execute("SELECT * FROM personnel WHERE category='正式职工'")
     elif category == 'outsourced':
-        cur.execute("SELECT * FROM personnel WHERE category IN ('C1','C2') ORDER BY id")
+        cur.execute("SELECT * FROM personnel WHERE category IN ('C1','C2')")
     elif category == 'C1':
-        cur.execute("SELECT * FROM personnel WHERE category='C1' ORDER BY id")
+        cur.execute("SELECT * FROM personnel WHERE category='C1'")
     elif category == 'C2':
-        cur.execute("SELECT * FROM personnel WHERE category='C2' ORDER BY id")
+        cur.execute("SELECT * FROM personnel WHERE category='C2'")
     else:
-        cur.execute("SELECT * FROM personnel ORDER BY id")
+        cur.execute("SELECT * FROM personnel")
     
     people = cur.fetchall()
     
@@ -43,6 +43,38 @@ def get_personnel():
         people = [p for p in people if key in (p['name'] or '').lower() 
                   or key in (p['position'] or '').lower()
                   or key in (p['project'] or '').lower()]
+    
+    # 排序逻辑
+    def sort_key(p):
+        # 1. 固定人员优先
+        fixed_order = {'邱方恒': 0, '廖志成': 1, '吕亮': 2, '李强': 3}
+        fixed = fixed_order.get(p['name'], 99)
+        
+        # 2. 人员类别
+        cat_order = {'正式职工': 0, 'C1': 1, 'C2': 2}
+        cat = cat_order.get(p.get('category', ''), 3)
+        
+        # 3. 项目优先级
+        project = p.get('project', '') or ''
+        if project == '后台':
+            proj = 0
+        elif project and project != '其他':
+            proj = 1
+        else:
+            proj = 2
+        
+        # 4. 职务级别
+        position = (p.get('position', '') or '').lower()
+        if any(k in position for k in ['经理', '书记']):
+            pos = 0
+        elif any(k in position for k in ['部长', '主管', '副部长']):
+            pos = 1
+        else:
+            pos = 2
+        
+        return (fixed, cat, proj, pos, p.get('name', ''))
+    
+    people.sort(key=sort_key)
     
     # 转换为JSON格式
     result = []
