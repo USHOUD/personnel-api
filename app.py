@@ -16,6 +16,36 @@ init_db()
 
 # ============= 人员相关API =============
 
+def get_dept(person):
+    """根据职位和项目自动推断部门"""
+    position = (person.get('position', '') or '').lower()
+    project = person.get('project', '') or ''
+    
+    # 领导班子
+    if any(k in position for k in ['经理', '书记']):
+        return '领导班子'
+    
+    # 后台人员
+    if project == '后台':
+        if any(k in position for k in ['bim', '设计']):
+            return '质量技术部'
+        elif any(k in position for k in ['商务', '预算', '造价', '结算']):
+            return '商务法务部'
+        elif any(k in position for k in ['财务', '会计']):
+            return '财务部'
+        elif any(k in position for k in ['安全']):
+            return '安全环保部'
+        else:
+            return '综合办公室'
+    
+    # 项目人员
+    if any(k in position for k in ['商务', '预算', '造价', '结算']):
+        return '商务法务部'
+    elif any(k in position for k in ['安全']):
+        return '安全环保部'
+    else:
+        return '工程技术部'
+
 @app.route('/api/personnel')
 def get_personnel():
     """获取人员列表"""
@@ -79,6 +109,11 @@ def get_personnel():
     # 转换为JSON格式
     result = []
     for p in people:
+        # 如果dept为空，自动推断
+        dept = p.get('dept', '') or ''
+        if not dept:
+            dept = get_dept(p)
+        
         result.append({
             'id': p['id'],
             'name': p['name'],
@@ -88,6 +123,7 @@ def get_personnel():
             'edu': p['edu'] or '',
             'hometown': p['hometown'] or '',
             'position': p['position'] or '',
+            'dept': dept,
             'project': p['project'] or '未分配',
             'phone': p['phone'] or '',
             'cert': p['cert'] or '',
@@ -114,11 +150,17 @@ def get_person(person_id):
     if not p:
         return jsonify({'error': '未找到该人员'}), 404
     
+    # 如果dept为空，自动推断
+    dept = p.get('dept', '') or ''
+    if not dept:
+        dept = get_dept(p)
+    
     return jsonify({
         'id': p['id'], 'name': p['name'], 'gender': p['gender'] or '',
         'id_card': p['id_card'] or '', 'birth': p['birth'] or '',
         'edu': p['edu'] or '', 'hometown': p['hometown'] or '',
-        'position': p['position'] or '', 'project': p['project'] or '未分配',
+        'position': p['position'] or '', 'dept': dept,
+        'project': p['project'] or '未分配',
         'phone': p['phone'] or '', 'cert': p['cert'] or '',
         'category': p['category'],
         'salary': float(p['salary']) if p['salary'] else None,
