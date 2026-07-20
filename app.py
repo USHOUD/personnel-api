@@ -523,11 +523,33 @@ def get_statistics():
     
     # 证书统计
     cur.execute("SELECT cert FROM personnel")
-    cert_stats = {'有证书': 0, '无证书': 0}
+    cert_stats = {
+        '一建': 0,
+        '一造': 0,
+        '二建': 0,
+        '二造': 0,
+        '八大员': 0,
+        '其他': 0,
+        '无证书': 0
+    }
+    total_with_cert = 0
     for row in cur.fetchall():
         cert = row['cert']
         if cert and cert.strip() and cert != '/':
-            cert_stats['有证书'] += 1
+            total_with_cert += 1
+            cert_lower = cert.lower()
+            if '一建' in cert or '一级建造师' in cert:
+                cert_stats['一建'] += 1
+            elif '一造' in cert or '一级造价' in cert:
+                cert_stats['一造'] += 1
+            elif '二建' in cert or '二级建造师' in cert:
+                cert_stats['二建'] += 1
+            elif '二造' in cert or '二级造价' in cert:
+                cert_stats['二造'] += 1
+            elif any(k in cert for k in ['安全员', '质量员', '施工员', '测量员', '资料员', '八大员']):
+                cert_stats['八大员'] += 1
+            else:
+                cert_stats['其他'] += 1
         else:
             cert_stats['无证书'] += 1
     
