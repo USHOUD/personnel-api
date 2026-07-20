@@ -528,18 +528,20 @@ def get_statistics():
         '一造': {'count': 0, 'persons': []},
         '二建': {'count': 0, 'persons': []},
         '二造': {'count': 0, 'persons': []},
-        '八大员': {'count': 0, 'persons': []},
+        '八大员': {'count': 0, 'detail': {}},
         '其他': {'count': 0, 'persons': []},
         '无证书': {'count': 0, 'persons': []}
     }
     total_with_cert = 0
+    
+    # 八大员证书关键词分类
+    badayuan_types = ['质量员', '施工员', '安全员', '测量员', '资料员', '材料员', '机械员', '劳务员', '标准员', '试验员']
+    
     for row in cur.fetchall():
         name = row['name']
         cert = row['cert']
         if cert and cert.strip() and cert != '/':
             total_with_cert += 1
-            # 存储"姓名-证书"格式
-            entry = f"{name}（{cert}）" if len(cert) < 30 else f"{name}（{cert[:25]}...）"
             if '一建' in cert or '一级建造师' in cert:
                 cert_stats['一建']['count'] += 1
                 cert_stats['一建']['persons'].append(name)
@@ -552,9 +554,17 @@ def get_statistics():
             elif '二造' in cert or '二级造价' in cert:
                 cert_stats['二造']['count'] += 1
                 cert_stats['二造']['persons'].append(name)
-            elif any(k in cert for k in ['安全员', '质量员', '施工员', '测量员', '资料员', '八大员']):
+            elif any(k in cert for k in badayuan_types):
                 cert_stats['八大员']['count'] += 1
-                cert_stats['八大员']['persons'].append(f"{name}（{cert}）")
+                # 按证书子类型分组
+                found_type = '其他'
+                for t in badayuan_types:
+                    if t in cert:
+                        found_type = t
+                        break
+                if found_type not in cert_stats['八大员']['detail']:
+                    cert_stats['八大员']['detail'][found_type] = []
+                cert_stats['八大员']['detail'][found_type].append(name)
             else:
                 cert_stats['其他']['count'] += 1
                 cert_stats['其他']['persons'].append(f"{name}（{cert}）")
