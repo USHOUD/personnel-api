@@ -522,36 +522,43 @@ def get_statistics():
     dept_stats = {row['project']: row['c'] for row in cur.fetchall()}
     
     # 证书统计
-    cur.execute("SELECT cert FROM personnel")
+    cur.execute("SELECT name, cert FROM personnel")
     cert_stats = {
-        '一建': 0,
-        '一造': 0,
-        '二建': 0,
-        '二造': 0,
-        '八大员': 0,
-        '其他': 0,
-        '无证书': 0
+        '一建': {'count': 0, 'persons': []},
+        '一造': {'count': 0, 'persons': []},
+        '二建': {'count': 0, 'persons': []},
+        '二造': {'count': 0, 'persons': []},
+        '八大员': {'count': 0, 'persons': []},
+        '其他': {'count': 0, 'persons': []},
+        '无证书': {'count': 0, 'persons': []}
     }
     total_with_cert = 0
     for row in cur.fetchall():
+        name = row['name']
         cert = row['cert']
         if cert and cert.strip() and cert != '/':
             total_with_cert += 1
-            cert_lower = cert.lower()
             if '一建' in cert or '一级建造师' in cert:
-                cert_stats['一建'] += 1
+                cert_stats['一建']['count'] += 1
+                cert_stats['一建']['persons'].append(name)
             elif '一造' in cert or '一级造价' in cert:
-                cert_stats['一造'] += 1
+                cert_stats['一造']['count'] += 1
+                cert_stats['一造']['persons'].append(name)
             elif '二建' in cert or '二级建造师' in cert:
-                cert_stats['二建'] += 1
+                cert_stats['二建']['count'] += 1
+                cert_stats['二建']['persons'].append(name)
             elif '二造' in cert or '二级造价' in cert:
-                cert_stats['二造'] += 1
+                cert_stats['二造']['count'] += 1
+                cert_stats['二造']['persons'].append(name)
             elif any(k in cert for k in ['安全员', '质量员', '施工员', '测量员', '资料员', '八大员']):
-                cert_stats['八大员'] += 1
+                cert_stats['八大员']['count'] += 1
+                cert_stats['八大员']['persons'].append(name)
             else:
-                cert_stats['其他'] += 1
+                cert_stats['其他']['count'] += 1
+                cert_stats['其他']['persons'].append(name)
         else:
-            cert_stats['无证书'] += 1
+            cert_stats['无证书']['count'] += 1
+            cert_stats['无证书']['persons'].append(name)
     
     # 一建指标
     cur.execute("SELECT * FROM exam_targets WHERE exam_type='一建' LIMIT 1")
