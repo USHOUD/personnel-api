@@ -118,13 +118,23 @@ def add_person():
         else:
             pid = f"{'F' if cat == '正式职工' else 'O'}1"
         
+        # salary转数字，空字符串转None
+        salary = data.get('salary')
+        if salary == '' or salary is None:
+            salary = None
+        else:
+            try:
+                salary = float(salary)
+            except:
+                salary = None
+        
         cur.execute("""
             INSERT INTO personnel (id, name, gender, id_card, birth, edu, hometown, position, project, phone, cert, category, salary)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (pid, data['name'], data.get('gender',''), data.get('id_card',''),
               data.get('birth',''), data.get('edu',''), data.get('hometown',''),
               data.get('position',''), data.get('project','未分配'),
-              data.get('phone',''), data.get('cert',''), cat, data.get('salary')))
+              data.get('phone',''), data.get('cert',''), cat, salary))
         
         conn.commit()
         cur.close()
