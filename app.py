@@ -29,7 +29,9 @@ def get_dept(person):
     if project == '后台':
         if any(k in position for k in ['bim', '设计']):
             return '质量技术部'
-        elif any(k in position for k in ['商务', '预算', '造价', '结算']):
+        elif any(k in position for k in ['策划', '调度']):
+            return '生产管理中心'
+        elif any(k in position for k in ['商务', '预算', '造价', '结算', '成本']):
             return '商务法务部'
         elif any(k in position for k in ['财务', '会计']):
             return '财务部'
@@ -39,7 +41,7 @@ def get_dept(person):
             return '综合办公室'
     
     # 项目人员
-    if any(k in position for k in ['商务', '预算', '造价', '结算']):
+    if any(k in position for k in ['商务', '预算', '造价', '结算', '成本']):
         return '商务法务部'
     elif any(k in position for k in ['安全']):
         return '安全环保部'
