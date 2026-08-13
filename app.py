@@ -748,6 +748,53 @@ def get_statistics():
         'exam_target': exam_target
     })
 
+# ============= 数据导出API =============
+
+@app.route('/api/export')
+def export_data():
+    """导出人员数据为CSV"""
+    try:
+        import csv
+        import io
+        from flask import Response
+        
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM personnel ORDER BY category, name")
+        people = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        output = io.StringIO()
+        output.write('\ufeff')  # BOM for Excel
+        writer = csv.writer(output)
+        writer.writerow(['ID', '姓名', '性别', '身份证号', '出生日期', '学历', '籍贯', 
+                        '岗位', '部门', '项目', '电话', '证书', '类别', '工资', 
+                        '状态', '状态详情', '入职日期', '离职日期'])
+        
+        for p in people:
+            dept = p.get('dept', '') or ''
+            if not dept:
+                dept = get_dept(p)
+            writer.writerow([
+                p['id'], p['name'], p.get('gender',''), p.get('id_card',''),
+                p.get('birth',''), p.get('edu',''), p.get('hometown',''),
+                p.get('position',''), dept, p.get('project',''),
+                p.get('phone',''), p.get('cert',''), p.get('category',''),
+                p.get('salary',''), p.get('status',''), p.get('status_detail',''),
+                p.get('hire_date',''), p.get('leave_date','')
+            ])
+        
+        output.seek(0)
+        return Response(
+            output.getvalue(),
+            mimetype='text/csv',
+            headers={'Content-Disposition': 'attachment; filename=personnel_export.csv'}
+        )
+    except Exception as e:
+        print(f"export error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # ============= 登录API =============
 
 # ============= 一建指标API =============
