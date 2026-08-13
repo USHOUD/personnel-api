@@ -10,7 +10,7 @@ from supabase_config import get_db, init_db
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, expose_headers=['X-User-Phone'])
 
 # 初始化数据库
 init_db()
