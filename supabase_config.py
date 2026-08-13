@@ -37,6 +37,8 @@ def init_db():
         salary NUMERIC,
         status VARCHAR(20) DEFAULT '在岗',
         status_detail VARCHAR(100) DEFAULT '',
+        hire_date VARCHAR(20) DEFAULT '',
+        leave_date VARCHAR(20) DEFAULT NULL,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
     );

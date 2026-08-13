@@ -4,7 +4,7 @@
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 from supabase_config import get_db, init_db
 
@@ -48,9 +48,45 @@ def get_dept(person):
     else:
         return '工程技术部'
 
+def auto_restore_on_duty():
+    """自动恢复在岗：检查出差/休假是否过期，过期则恢复为在岗"""
+    try:
+        import re
+        # 北京时间 = UTC+8
+        now_bj = datetime.utcnow() + timedelta(hours=8)
+        today_str = now_bj.strftime('%Y-%m-%d')
+
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, status, status_detail FROM personnel WHERE status IN ('出差','休假')")
+        rows = cur.fetchall()
+
+        restored = []
+        for row in rows:
+            detail = row.get('status_detail', '') or ''
+            # 提取日期：匹配 至YYYY-MM-DD 或 (至YYYY-MM-DD)
+            m = re.search(r'至(\d{4}-\d{2}-\d{2})', detail)
+            if m:
+                end_date = m.group(1)
+                if today_str > end_date:
+                    cur.execute("UPDATE personnel SET status='在岗', status_detail='', updated_at=NOW() WHERE id=%s", (row['id'],))
+                    restored.append(row['id'])
+
+        if restored:
+            conn.commit()
+        cur.close()
+        conn.close()
+        return restored
+    except Exception as e:
+        print(f"auto_restore_on_duty error: {e}")
+        return []
+
 @app.route('/api/personnel')
 def get_personnel():
     """获取人员列表"""
+    # 自动恢复过期的出差/休假人员
+    auto_restore_on_duty()
+
     conn = get_db()
     cur = conn.cursor()
     
@@ -132,7 +168,9 @@ def get_personnel():
             'category': p['category'],
             'salary': float(p['salary']) if p['salary'] else None,
             'status': p['status'] or '在岗',
-            'status_detail': p['status_detail'] or ''
+            'status_detail': p['status_detail'] or '',
+            'hire_date': p.get('hire_date', '') or '',
+            'leave_date': p.get('leave_date', '') or ''
         })
     
     cur.close()
@@ -166,7 +204,8 @@ def get_person(person_id):
         'phone': p['phone'] or '', 'cert': p['cert'] or '',
         'category': p['category'],
         'salary': float(p['salary']) if p['salary'] else None,
-        'status': p['status'] or '在岗', 'status_detail': p['status_detail'] or ''
+        'status': p['status'] or '在岗', 'status_detail': p['status_detail'] or '',
+        'hire_date': p.get('hire_date', '') or '', 'leave_date': p.get('leave_date', '') or ''
     })
 
 @app.route('/api/personnel', methods=['POST'])
@@ -205,13 +244,14 @@ def add_person():
                 salary = None
         
         cur.execute("""
-            INSERT INTO personnel (id, name, gender, id_card, birth, edu, hometown, position, dept, project, phone, cert, category, salary)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            INSERT INTO personnel (id, name, gender, id_card, birth, edu, hometown, position, dept, project, phone, cert, category, salary, hire_date)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (pid, data['name'], data.get('gender',''), data.get('id_card',''),
               data.get('birth',''), data.get('edu',''), data.get('hometown',''),
               data.get('position',''), data.get('dept',''),
               data.get('project','未分配'),
-              data.get('phone',''), data.get('cert',''), cat, salary))
+              data.get('phone',''), data.get('cert',''), cat, salary,
+              data.get('hire_date', '') or None))
         
         conn.commit()
         cur.close()
@@ -237,7 +277,7 @@ def update_person(person_id):
         
         fields = []
         values = []
-        for key in ['name','gender','id_card','birth','edu','hometown','position','dept','project','phone','cert','category','salary','status','status_detail']:
+        for key in ['name','gender','id_card','birth','edu','hometown','position','dept','project','phone','cert','category','salary','status','status_detail','hire_date','leave_date']:
             if key in data:
                 val = data[key]
                 # salary空字符串转None
@@ -295,6 +335,60 @@ def person_return(person_id):
     cur.close()
     conn.close()
     return jsonify({'success': True})
+
+@app.route('/api/personnel/<person_id>/resign', methods=['PUT'])
+def person_resign(person_id):
+    """离职：设置leave_date和状态为已离职"""
+    try:
+        data = request.json or {}
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("SELECT id FROM personnel WHERE id=%s", (person_id,))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return jsonify({'error': '未找到该人员'}), 404
+
+        leave_date = data.get('leave_date', '') or datetime.utcnow().strftime('%Y-%m-%d')
+        cur.execute("UPDATE personnel SET status='已离职', leave_date=%s, status_detail='', updated_at=NOW() WHERE id=%s",
+                    (leave_date, person_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"person_resign error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/personnel/<person_id>/hire', methods=['PUT'])
+def person_hire(person_id):
+    """入职/重新入职：设置hire_date和状态为在岗"""
+    try:
+        data = request.json or {}
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("SELECT id FROM personnel WHERE id=%s", (person_id,))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return jsonify({'error': '未找到该人员'}), 404
+
+        hire_date = data.get('hire_date', '') or datetime.utcnow().strftime('%Y-%m-%d')
+        cur.execute("UPDATE personnel SET status='在岗', hire_date=%s, leave_date=NULL, status_detail='', updated_at=NOW() WHERE id=%s",
+                    (hire_date, person_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"person_hire error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/auto-restore', methods=['POST'])
+def auto_restore_api():
+    """手动触发自动恢复在岗（也供前端定期调用）"""
+    restored = auto_restore_on_duty()
+    return jsonify({'success': True, 'restored': restored, 'count': len(restored)})
 
 # ============= 调动记录API =============
 
@@ -503,8 +597,14 @@ def approve_trip(record_id):
     record = cur.fetchone()
     
     if record:
+        # 获取出差结束日期用于自动恢复
+        cur.execute("SELECT end_date FROM trip_records WHERE id=%s", (record_id,))
+        trip = cur.fetchone()
+        end_str = ''
+        if trip and trip.get('end_date'):
+            end_str = f"(至{trip['end_date']})"
         cur.execute("UPDATE personnel SET status='出差', status_detail=%s, updated_at=NOW() WHERE id=%s",
-                    (f"出差-{record['destination']}", record['person_id']))
+                    (f"出差-{record['destination']}{end_str}", record['person_id']))
         conn.commit()
     
     cur.close()
@@ -551,6 +651,7 @@ def get_statistics():
     # 学历统计
     def map_edu(edu):
         if not edu: return '未知'
+        if any(k in edu for k in ['硕士','研究生']): return '硕士研究生'
         if any(k in edu for k in ['本科','大学']): return '本科'
         if any(k in edu for k in ['专科','大专']): return '专科'
         if any(k in edu for k in ['中专','初中','高中']): return '高中及以下'
