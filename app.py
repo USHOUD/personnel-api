@@ -15,6 +15,62 @@ CORS(app)
 # 初始化数据库
 init_db()
 
+# ============= 权限管理 =============
+
+def get_current_user():
+    """从请求头获取当前用户信息"""
+    phone = request.headers.get('X-User-Phone', '')
+    if not phone:
+        return None
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT phone, name, is_admin FROM users WHERE phone=%s", (phone,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+    return user
+
+def mask_person_data(p, is_self=False, is_admin=False):
+    """根据权限过滤人员数据"""
+    dept = p.get('dept', '') or ''
+    if not dept:
+        dept = get_dept(p)
+    
+    # 管理员或本人看完整信息
+    if is_admin or is_self:
+        return {
+            'id': p['id'],
+            'name': p['name'],
+            'gender': p.get('gender', '') or '',
+            'id_card': p.get('id_card', '') or '',
+            'birth': p.get('birth', '') or '',
+            'edu': p.get('edu', '') or '',
+            'hometown': p.get('hometown', '') or '',
+            'position': p.get('position', '') or '',
+            'dept': dept,
+            'project': p.get('project', '') or '未分配',
+            'phone': p.get('phone', '') or '',
+            'cert': p.get('cert', '') or '',
+            'category': p.get('category', ''),
+            'salary': float(p['salary']) if p.get('salary') else None,
+            'status': p.get('status', '') or '在岗',
+            'status_detail': p.get('status_detail', '') or '',
+            'hire_date': p.get('hire_date', '') or '',
+            'leave_date': p.get('leave_date', '') or ''
+        }
+    
+    # 普通用户看别人：只显示基本信息
+    return {
+        'id': p['id'],
+        'name': p['name'],
+        'position': p.get('position', '') or '',
+        'dept': dept,
+        'project': p.get('project', '') or '未分配',
+        'phone': p.get('phone', '') or '',
+        'category': p.get('category', ''),
+        'status': p.get('status', '') or '在岗'
+    }
+
 # ============= 人员相关API =============
 
 def get_dept(person):
@@ -145,34 +201,28 @@ def get_personnel():
     
     people.sort(key=sort_key)
     
+    # 获取当前用户权限
+    current_user = get_current_user()
+    is_admin = current_user['is_admin'] if current_user else False
+    current_user_phone = current_user['phone'] if current_user else ''
+    
+    # 找到当前用户的personnel_id
+    current_person_id = None
+    if current_user_phone:
+        conn2 = get_db()
+        cur2 = conn2.cursor()
+        cur2.execute("SELECT id FROM personnel WHERE phone=%s", (current_user_phone,))
+        row = cur2.fetchone()
+        if row:
+            current_person_id = row['id']
+        cur2.close()
+        conn2.close()
+    
     # 转换为JSON格式
     result = []
     for p in people:
-        # 如果dept为空，自动推断
-        dept = p.get('dept', '') or ''
-        if not dept:
-            dept = get_dept(p)
-        
-        result.append({
-            'id': p['id'],
-            'name': p['name'],
-            'gender': p['gender'] or '',
-            'id_card': p['id_card'] or '',
-            'birth': p['birth'] or '',
-            'edu': p['edu'] or '',
-            'hometown': p['hometown'] or '',
-            'position': p['position'] or '',
-            'dept': dept,
-            'project': p['project'] or '未分配',
-            'phone': p['phone'] or '',
-            'cert': p['cert'] or '',
-            'category': p['category'],
-            'salary': float(p['salary']) if p['salary'] else None,
-            'status': p['status'] or '在岗',
-            'status_detail': p['status_detail'] or '',
-            'hire_date': p.get('hire_date', '') or '',
-            'leave_date': p.get('leave_date', '') or ''
-        })
+        is_self = (p['id'] == current_person_id)
+        result.append(mask_person_data(p, is_self=is_self, is_admin=is_admin))
     
     cur.close()
     conn.close()
@@ -191,23 +241,14 @@ def get_person(person_id):
     if not p:
         return jsonify({'error': '未找到该人员'}), 404
     
-    # 如果dept为空，自动推断
-    dept = p.get('dept', '') or ''
-    if not dept:
-        dept = get_dept(p)
+    # 权限检查
+    current_user = get_current_user()
+    is_admin = current_user['is_admin'] if current_user else False
+    current_user_phone = current_user['phone'] if current_user else ''
     
-    return jsonify({
-        'id': p['id'], 'name': p['name'], 'gender': p['gender'] or '',
-        'id_card': p['id_card'] or '', 'birth': p['birth'] or '',
-        'edu': p['edu'] or '', 'hometown': p['hometown'] or '',
-        'position': p['position'] or '', 'dept': dept,
-        'project': p['project'] or '未分配',
-        'phone': p['phone'] or '', 'cert': p['cert'] or '',
-        'category': p['category'],
-        'salary': float(p['salary']) if p['salary'] else None,
-        'status': p['status'] or '在岗', 'status_detail': p['status_detail'] or '',
-        'hire_date': p.get('hire_date', '') or '', 'leave_date': p.get('leave_date', '') or ''
-    })
+    is_self = (p.get('phone', '') == current_user_phone)
+    
+    return jsonify(mask_person_data(p, is_self=is_self, is_admin=is_admin))
 
 @app.route('/api/personnel', methods=['POST'])
 def add_person():
