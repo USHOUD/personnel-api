@@ -1297,6 +1297,10 @@ def reset_password():
     if admin_phone != SUPER_ADMIN:
         return jsonify({'error': '请联系办公室徐钟亿进行密码重置'}), 403
     
+    # 禁止重置超级管理员自己的账号（防止被滥用）
+    if phone == SUPER_ADMIN:
+        return jsonify({'error': '超级管理员账号不能通过此方式重置密码，请联系系统管理员'}), 403
+    
     try:
         conn = get_db()
         cur = conn.cursor()
