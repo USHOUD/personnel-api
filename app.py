@@ -63,6 +63,7 @@ def mask_person_data(p, is_self=False, is_admin=False):
     return {
         'id': p['id'],
         'name': p['name'],
+        'gender': p.get('gender', '') or '',
         'position': p.get('position', '') or '',
         'dept': dept,
         'project': p.get('project', '') or '未分配',
@@ -449,6 +450,14 @@ def get_leave_balance(person_id):
         if not person:
             cur.close(); conn.close()
             return jsonify({'error': '未找到该人员'}), 404
+        
+        # 权限检查：仅本人或管理员可查看假期余额
+        current_user = get_current_user()
+        is_admin = current_user and current_user.get('is_admin', False)
+        is_self = current_user and current_user.get('phone') == person.get('phone')
+        if not is_admin and not is_self:
+            cur.close(); conn.close()
+            return jsonify({'error': '无权限查看'}), 403
         
         category = person.get('category', '')
         hire_date = person.get('hire_date', '') or ''
