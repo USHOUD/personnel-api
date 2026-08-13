@@ -752,44 +752,112 @@ def get_statistics():
 
 @app.route('/api/export')
 def export_data():
-    """导出人员数据为CSV"""
+    """导出人员数据为Excel"""
     try:
-        import csv
         import io
-        from flask import Response
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, Border, Side
+        from flask import send_file
         
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM personnel ORDER BY category, name")
+        cur.execute("SELECT * FROM personnel")
         people = cur.fetchall()
         cur.close()
         conn.close()
         
-        output = io.StringIO()
-        output.write('\ufeff')  # BOM for Excel
-        writer = csv.writer(output)
-        writer.writerow(['ID', '姓名', '性别', '身份证号', '出生日期', '学历', '籍贯', 
-                        '岗位', '部门', '项目', '电话', '证书', '类别', '工资', 
-                        '状态', '状态详情', '入职日期', '离职日期'])
+        # 排序（与小程序一致）
+        def sort_key(p):
+            fixed_order = {'邱方恒': 0, '廖志成': 1, '吕亮': 2, '李强': 3}
+            fixed = fixed_order.get(p['name'], 99)
+            cat_order = {'正式职工': 0, 'C1': 1, 'C2': 2}
+            cat = cat_order.get(p.get('category', ''), 3)
+            project = p.get('project', '') or ''
+            if project == '后台': proj = 0
+            elif project and project != '其他': proj = 1
+            else: proj = 2
+            position = (p.get('position', '') or '').lower()
+            if any(k in position for k in ['经理', '书记']): pos = 0
+            elif any(k in position for k in ['部长', '主管', '副部长']): pos = 1
+            else: pos = 2
+            return (fixed, cat, proj, pos, p.get('name', ''))
         
-        for p in people:
+        people.sort(key=sort_key)
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = '人员名单'
+        
+        # 表头
+        headers = ['序号', 'ID', '姓名', '性别', '身份证号', '出生日期', '学历', '籍贯',
+                   '岗位', '部门', '项目', '电话', '证书', '类别', '工资',
+                   '状态', '状态详情', '入职日期', '离职日期']
+        
+        thin = Side(style='thin')
+        border_all = Border(left=thin, right=thin, top=thin, bottom=thin)
+        header_font = Font(name='宋体', size=11, bold=True)
+        data_font = Font(name='宋体', size=10)
+        center_align = Alignment(horizontal='center', vertical='center')
+        
+        for col, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.font = header_font
+            cell.alignment = center_align
+            cell.border = border_all
+        
+        # 数据
+        for i, p in enumerate(people):
             dept = p.get('dept', '') or ''
             if not dept:
                 dept = get_dept(p)
-            writer.writerow([
-                p['id'], p['name'], p.get('gender',''), p.get('id_card',''),
-                p.get('birth',''), p.get('edu',''), p.get('hometown',''),
-                p.get('position',''), dept, p.get('project',''),
-                p.get('phone',''), p.get('cert',''), p.get('category',''),
-                p.get('salary',''), p.get('status',''), p.get('status_detail',''),
-                p.get('hire_date',''), p.get('leave_date','')
-            ])
+            
+            row_data = [
+                i + 1,
+                p['id'],
+                p['name'],
+                p.get('gender', ''),
+                p.get('id_card', ''),
+                p.get('birth', ''),
+                p.get('edu', ''),
+                p.get('hometown', ''),
+                p.get('position', ''),
+                dept,
+                p.get('project', ''),
+                p.get('phone', ''),
+                p.get('cert', ''),
+                p.get('category', ''),
+                float(p['salary']) if p.get('salary') else '',
+                p.get('status', ''),
+                p.get('status_detail', ''),
+                p.get('hire_date', ''),
+                p.get('leave_date', '') or ''
+            ]
+            
+            for col, val in enumerate(row_data, 1):
+                cell = ws.cell(row=i + 2, column=col, value=val)
+                cell.font = data_font
+                cell.alignment = center_align
+                cell.border = border_all
         
+        # 自动列宽
+        for col in range(1, len(headers) + 1):
+            max_len = len(str(headers[col - 1]))
+            for row in range(2, len(people) + 2):
+                val = ws.cell(row=row, column=col).value
+                if val:
+                    max_len = max(max_len, len(str(val)))
+            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = min(max_len + 4, 30)
+        
+        # 保存到内存
+        output = io.BytesIO()
+        wb.save(output)
         output.seek(0)
-        return Response(
-            output.getvalue(),
-            mimetype='text/csv',
-            headers={'Content-Disposition': 'attachment; filename=personnel_export.csv'}
+        
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='安装公司人员名单.xlsx'
         )
     except Exception as e:
         print(f"export error: {e}")
