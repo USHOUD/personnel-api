@@ -509,11 +509,12 @@ def get_leave_balance(person_id):
             })
         
         if category == '正式职工' and family_leave > 0:
+            family_used_flag = 1 if used_family > 0 else 0
             result['leave_types'].append({
                 'type': '探亲假（探配偶）',
-                'total': family_leave,
-                'used': used_family,
-                'remaining': max(0, family_leave - used_family)
+                'total': f'{family_leave}天/年（一次）',
+                'used': f'已休{used_family}天' if used_family > 0 else '未休',
+                'remaining': 0 if used_family > 0 else family_leave
             })
         
         # 其他假期类型（不扣额度）
@@ -609,7 +610,7 @@ def get_all_leave_balance():
             if category == '正式职工':
                 entry['family_total'] = 30 if work_years >= 1 else 0
                 entry['family_used'] = used_family
-                entry['family_remaining'] = max(0, entry['family_total'] - used_family)
+                entry['family_remaining'] = 0 if used_family > 0 else entry['family_total']
             
             results.append(entry)
         
