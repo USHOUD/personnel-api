@@ -7,6 +7,7 @@ from flask_cors import CORS
 from datetime import datetime, timedelta
 import hashlib
 from supabase_config import get_db, init_db
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 CORS(app)
