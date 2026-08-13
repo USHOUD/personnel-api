@@ -390,6 +390,235 @@ def auto_restore_api():
     restored = auto_restore_on_duty()
     return jsonify({'success': True, 'restored': restored, 'count': len(restored)})
 
+# ============= 假期余额API =============
+
+@app.route('/api/leave-balance/<person_id>')
+def get_leave_balance(person_id):
+    """获取人员假期余额"""
+    try:
+        import re
+        from datetime import datetime as dt
+        
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("SELECT * FROM personnel WHERE id=%s", (person_id,))
+        person = cur.fetchone()
+        if not person:
+            cur.close(); conn.close()
+            return jsonify({'error': '未找到该人员'}), 404
+        
+        category = person.get('category', '')
+        hire_date = person.get('hire_date', '') or ''
+        birth = person.get('birth', '') or ''
+        
+        now = dt.now()
+        current_year = now.year
+        
+        # 计算工龄（正式职工用参加工作时间，外包用入职时间）
+        work_years = 0
+        if category == '正式职工':
+            # 正式职工从出生+22岁估算，或从hire_date
+            if hire_date:
+                try:
+                    hd = dt.strptime(hire_date[:10], '%Y-%m-%d')
+                    work_years = (now - hd).days / 365.25
+                except:
+                    work_years = 0
+        else:
+            # 外包人员从hire_date算
+            if hire_date:
+                try:
+                    hd = dt.strptime(hire_date[:10], '%Y-%m-%d')
+                    work_years = (now - hd).days / 365.25
+                except:
+                    work_years = 0
+        
+        # 年休假天数
+        annual_leave = 0
+        if category == '正式职工':
+            if work_years >= 20:
+                annual_leave = 15
+            elif work_years >= 10:
+                annual_leave = 10
+            elif work_years >= 1:
+                annual_leave = 5
+        else:
+            # 外包：满1年后5天
+            if work_years >= 1:
+                annual_leave = 5
+        
+        # 探亲假（正式职工，工作满1年）
+        family_leave = 0
+        if category == '正式职工' and work_years >= 1:
+            family_leave = 30  # 默认探配偶30天
+        
+        # 统计当年已使用假期
+        cur.execute("""
+            SELECT reason, start_date, end_date FROM leave_records 
+            WHERE person_id=%s AND status='已通过' 
+            AND start_date >= %s AND start_date < %s
+        """, (person_id, f'{current_year}-01-01', f'{current_year + 1}-01-01'))
+        used_records = cur.fetchall()
+        
+        used_annual = 0
+        used_family = 0
+        used_other = 0
+        used_details = []
+        
+        for r in used_records:
+            try:
+                start = dt.strptime(r['start_date'], '%Y-%m-%d')
+                end = dt.strptime(r['end_date'], '%Y-%m-%d')
+                days = (end - start).days + 1
+            except:
+                days = 0
+            
+            reason = r.get('reason', '') or ''
+            used_details.append({'reason': reason, 'days': days, 'start': r['start_date'], 'end': r['end_date']})
+            
+            if '年休' in reason:
+                used_annual += days
+            elif '探亲' in reason:
+                used_family += days
+            else:
+                used_other += days
+        
+        cur.close()
+        conn.close()
+        
+        # 从考勤表统计（更准确）
+        # 先用leave_records的统计
+        
+        result = {
+            'person_id': person_id,
+            'name': person['name'],
+            'category': category,
+            'hire_date': hire_date,
+            'work_years': round(work_years, 1),
+            'leave_types': []
+        }
+        
+        if annual_leave > 0:
+            result['leave_types'].append({
+                'type': '年休假',
+                'total': annual_leave,
+                'used': used_annual,
+                'remaining': max(0, annual_leave - used_annual)
+            })
+        
+        if category == '正式职工' and family_leave > 0:
+            result['leave_types'].append({
+                'type': '探亲假（探配偶）',
+                'total': family_leave,
+                'used': used_family,
+                'remaining': max(0, family_leave - used_family)
+            })
+        
+        # 其他假期类型（不扣额度）
+        if used_other > 0:
+            result['leave_types'].append({
+                'type': '其他假（病/陪产/事假等）',
+                'total': '-',
+                'used': used_other,
+                'remaining': '-'
+            })
+        
+        result['used_details'] = used_details
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"leave_balance error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/leave-balance')
+def get_all_leave_balance():
+    """获取所有人员假期余额"""
+    try:
+        from datetime import datetime as dt
+        
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("SELECT * FROM personnel WHERE status != '已离职' ORDER BY category, name")
+        people = cur.fetchall()
+        
+        now = dt.now()
+        current_year = now.year
+        
+        # 获取当年所有已审批休假
+        cur.execute("""
+            SELECT person_id, reason, start_date, end_date FROM leave_records 
+            WHERE status='已通过' AND start_date >= %s AND start_date < %s
+        """, (f'{current_year}-01-01', f'{current_year + 1}-01-01'))
+        all_used = cur.fetchall()
+        
+        # 按人员分组
+        used_map = {}
+        for r in all_used:
+            pid = r['person_id']
+            if pid not in used_map:
+                used_map[pid] = []
+            used_map[pid].append(r)
+        
+        results = []
+        for p in people:
+            category = p.get('category', '')
+            hire_date = p.get('hire_date', '') or ''
+            
+            work_years = 0
+            if hire_date:
+                try:
+                    hd = dt.strptime(hire_date[:10], '%Y-%m-%d')
+                    work_years = (now - hd).days / 365.25
+                except:
+                    pass
+            
+            annual_leave = 0
+            if category == '正式职工':
+                if work_years >= 20: annual_leave = 15
+                elif work_years >= 10: annual_leave = 10
+                elif work_years >= 1: annual_leave = 5
+            else:
+                if work_years >= 1: annual_leave = 5
+            
+            used_annual = 0
+            used_family = 0
+            for r in used_map.get(p['id'], []):
+                try:
+                    s = dt.strptime(r['start_date'], '%Y-%m-%d')
+                    e = dt.strptime(r['end_date'], '%Y-%m-%d')
+                    days = (e - s).days + 1
+                except:
+                    days = 0
+                reason = r.get('reason', '') or ''
+                if '年休' in reason: used_annual += days
+                elif '探亲' in reason: used_family += days
+            
+            entry = {
+                'id': p['id'],
+                'name': p['name'],
+                'category': category,
+                'work_years': round(work_years, 1),
+                'annual_total': annual_leave,
+                'annual_used': used_annual,
+                'annual_remaining': max(0, annual_leave - used_annual),
+            }
+            
+            if category == '正式职工':
+                entry['family_total'] = 30 if work_years >= 1 else 0
+                entry['family_used'] = used_family
+                entry['family_remaining'] = max(0, entry['family_total'] - used_family)
+            
+            results.append(entry)
+        
+        cur.close()
+        conn.close()
+        return jsonify(results)
+    except Exception as e:
+        print(f"all_leave_balance error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # ============= 调动记录API =============
 
 @app.route('/api/transfers')
