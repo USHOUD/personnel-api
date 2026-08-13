@@ -1397,10 +1397,27 @@ def get_salary_pdf(filename):
     if not os.path.exists(pdf_path):
         return jsonify({'error': '文件不存在'}), 404
     
-    # 权限检查：只有管理员可以下载（可选：也可以允许本人下载）
-    is_admin = current_user.get('is_admin', False)
-    if not is_admin:
-        return jsonify({'error': '仅管理员可下载人事令PDF'}), 403
+    # 权限检查：管理员或本人可以下载
+    # 需要从filename中提取人员姓名来验证
+    import re
+    name_match = re.search(r'关于(.{2,4})(内部调动|毕业分配|职务任免|转正定职|技术职务聘任)', filename)
+    if name_match:
+        person_name = name_match.group(1)
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT phone FROM personnel WHERE name=%s", (person_name,))
+        person = cur.fetchone()
+        cur.close(); conn.close()
+        
+        is_self = person and current_user.get('phone') == person.get('phone')
+        is_admin = current_user.get('is_admin', False)
+        
+        if not is_admin and not is_self:
+            return jsonify({'error': '无权限下载'}), 403
+    else:
+        # 无法识别姓名，仅管理员可下载
+        if not current_user.get('is_admin', False):
+            return jsonify({'error': '无权限下载'}), 403
     
     return send_file(pdf_path, mimetype='application/pdf', as_attachment=False)
 
