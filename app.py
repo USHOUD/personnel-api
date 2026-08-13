@@ -1284,7 +1284,7 @@ def change_password():
 
 @app.route('/api/reset-password', methods=['POST'])
 def reset_password():
-    """重置密码（管理员或本人）"""
+    """重置密码（仅超级管理员18184005669）"""
     data = request.json
     phone = data.get('phone', '').strip()
     admin_phone = data.get('admin_phone', '').strip()
@@ -1292,17 +1292,21 @@ def reset_password():
     if not phone:
         return jsonify({'error': '手机号不能为空'}), 400
     
+    # 只允许超级管理员18184005669重置密码
+    SUPER_ADMIN = '18184005669'
+    if admin_phone != SUPER_ADMIN:
+        return jsonify({'error': '请联系办公室徐钟亿进行密码重置'}), 403
+    
     try:
         conn = get_db()
         cur = conn.cursor()
         
-        # 检查是否是管理员操作
-        if admin_phone:
-            cur.execute("SELECT is_admin FROM users WHERE phone=%s", (admin_phone,))
-            admin = cur.fetchone()
-            if not admin or not admin['is_admin']:
-                cur.close(); conn.close()
-                return jsonify({'error': '无权限'}), 403
+        # 验证管理员身份
+        cur.execute("SELECT is_admin FROM users WHERE phone=%s", (admin_phone,))
+        admin = cur.fetchone()
+        if not admin or not admin['is_admin']:
+            cur.close(); conn.close()
+            return jsonify({'error': '无权限'}), 403
         
         # 重置为默认密码
         cur.execute("UPDATE users SET password='123456' WHERE phone=%s", (phone,))
