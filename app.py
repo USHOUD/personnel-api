@@ -1238,6 +1238,75 @@ def login():
         }
     })
 
+@app.route('/api/change-password', methods=['PUT'])
+def change_password():
+    """修改密码"""
+    data = request.json
+    phone = data.get('phone', '').strip()
+    old_password = data.get('old_password', '').strip()
+    new_password = data.get('new_password', '').strip()
+    
+    if not phone or not old_password or not new_password:
+        return jsonify({'error': '信息不完整'}), 400
+    
+    if len(new_password) < 6:
+        return jsonify({'error': '新密码至少6位'}), 400
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT password FROM users WHERE phone=%s", (phone,))
+        user = cur.fetchone()
+        
+        if not user:
+            cur.close(); conn.close()
+            return jsonify({'error': '用户不存在'}), 404
+        
+        if user['password'] != old_password:
+            cur.close(); conn.close()
+            return jsonify({'error': '原密码错误'}), 401
+        
+        cur.execute("UPDATE users SET password=%s WHERE phone=%s", (new_password, phone))
+        conn.commit()
+        cur.close(); conn.close()
+        return jsonify({'success': True, 'message': '密码修改成功'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/reset-password', methods=['POST'])
+def reset_password():
+    """重置密码（管理员或本人）"""
+    data = request.json
+    phone = data.get('phone', '').strip()
+    admin_phone = data.get('admin_phone', '').strip()
+    
+    if not phone:
+        return jsonify({'error': '手机号不能为空'}), 400
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # 检查是否是管理员操作
+        if admin_phone:
+            cur.execute("SELECT is_admin FROM users WHERE phone=%s", (admin_phone,))
+            admin = cur.fetchone()
+            if not admin or not admin['is_admin']:
+                cur.close(); conn.close()
+                return jsonify({'error': '无权限'}), 403
+        
+        # 重置为默认密码
+        cur.execute("UPDATE users SET password='123456' WHERE phone=%s", (phone,))
+        if cur.rowcount == 0:
+            cur.close(); conn.close()
+            return jsonify({'error': '用户不存在'}), 404
+        
+        conn.commit()
+        cur.close(); conn.close()
+        return jsonify({'success': True, 'message': '密码已重置为123456'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # ============= Render部署 =============
 if __name__ == "__main__":
     import os
