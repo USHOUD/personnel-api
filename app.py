@@ -1324,6 +1324,86 @@ def reset_password():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# ============= 工资信息API =============
+
+@app.route('/api/salary/<person_id>')
+def get_salary(person_id):
+    """获取人员工资信息（仅本人/管理员）"""
+    current_user = get_current_user()
+    is_admin = current_user and current_user.get('is_admin', False)
+    
+    # 获取人员信息
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, phone FROM personnel WHERE id=%s", (person_id,))
+    person = cur.fetchone()
+    
+    if not person:
+        cur.close(); conn.close()
+        return jsonify({'error': '未找到该人员'}), 404
+    
+    # 权限检查：仅本人或管理员
+    is_self = current_user and current_user.get('phone') == person.get('phone')
+    if not is_admin and not is_self:
+        cur.close(); conn.close()
+        return jsonify({'error': '无权限查看'}), 403
+    
+    # 查询工资信息
+    cur.execute("""
+        SELECT person_name, document_no, document_title, pdf_filename,
+            base_salary, edu_salary, skill_salary, seniority_salary, 
+            guarantee_salary, settlement_fee, talent_allowance, effective_date
+        FROM salary WHERE person_name=%s ORDER BY effective_date DESC
+    """, (person['name'],))
+    
+    salary_records = []
+    for row in cur.fetchall():
+        salary_records.append({
+            'person_name': row[0],
+            'document_no': row[1],
+            'document_title': row[2],
+            'pdf_filename': row[3],
+            'base_salary': float(row[4]) if row[4] else 0,
+            'edu_salary': float(row[5]) if row[5] else 0,
+            'skill_salary': float(row[6]) if row[6] else 0,
+            'seniority_salary': float(row[7]) if row[7] else 0,
+            'guarantee_salary': float(row[8]) if row[8] else 0,
+            'settlement_fee': float(row[9]) if row[9] else 0,
+            'talent_allowance': float(row[10]) if row[10] else 0,
+            'effective_date': str(row[11]) if row[11] else None
+        })
+    
+    cur.close(); conn.close()
+    return jsonify({'salary_records': salary_records})
+
+@app.route('/api/salary/pdf/<filename>')
+def get_salary_pdf(filename):
+    """下载人事令PDF（仅本人/管理员）"""
+    import os
+    from flask import send_file
+    
+    current_user = get_current_user()
+    if not current_user:
+        return jsonify({'error': '请先登录'}), 401
+    
+    # 安全检查：防止路径遍历
+    if '..' in filename or '/' in filename:
+        return jsonify({'error': '无效文件名'}), 400
+    
+    # PDF文件目录（生产环境需要改为云存储路径）
+    pdf_dir = "/mnt/e/BaiduNetdiskDownload/安装公司/人力资源/人事令"
+    pdf_path = os.path.join(pdf_dir, filename)
+    
+    if not os.path.exists(pdf_path):
+        return jsonify({'error': '文件不存在'}), 404
+    
+    # 权限检查：只有管理员可以下载（可选：也可以允许本人下载）
+    is_admin = current_user.get('is_admin', False)
+    if not is_admin:
+        return jsonify({'error': '仅管理员可下载人事令PDF'}), 403
+    
+    return send_file(pdf_path, mimetype='application/pdf', as_attachment=False)
+
 # ============= Render部署 =============
 if __name__ == "__main__":
     import os
