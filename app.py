@@ -1352,12 +1352,18 @@ def get_salary(person_id):
     cur.execute("""
         SELECT person_name, document_no, document_title, pdf_filename,
             base_salary, edu_salary, skill_salary, seniority_salary, 
-            guarantee_salary, settlement_fee, talent_allowance, effective_date
+            guarantee_salary, settlement_fee, talent_allowance, effective_date,
+            pdf_storage_path
         FROM salary WHERE person_name=%s ORDER BY effective_date DESC
     """, (person['name'],))
     
+    SUPABASE_URL = "https://kohuwtvxfvgbjdbmszao.supabase.co"
     salary_records = []
     for row in cur.fetchall():
+        pdf_url = None
+        if row[12]:  # pdf_storage_path
+            pdf_url = f"{SUPABASE_URL}/storage/v1/object/public/salary-pdfs/{row[12]}"
+        
         salary_records.append({
             'person_name': row[0],
             'document_no': row[1],
@@ -1370,7 +1376,8 @@ def get_salary(person_id):
             'guarantee_salary': float(row[8]) if row[8] else 0,
             'settlement_fee': float(row[9]) if row[9] else 0,
             'talent_allowance': float(row[10]) if row[10] else 0,
-            'effective_date': str(row[11]) if row[11] else None
+            'effective_date': str(row[11]) if row[11] else None,
+            'pdf_url': pdf_url
         })
     
     cur.close(); conn.close()
