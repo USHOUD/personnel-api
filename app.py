@@ -1361,22 +1361,22 @@ def get_salary(person_id):
     salary_records = []
     for row in cur.fetchall():
         pdf_url = None
-        if row[12]:  # pdf_storage_path
-            pdf_url = f"{SUPABASE_URL}/storage/v1/object/public/salary-pdfs/{row[12]}"
+        if row.get('pdf_storage_path'):
+            pdf_url = f"{SUPABASE_URL}/storage/v1/object/public/salary-pdfs/{row['pdf_storage_path']}"
         
         salary_records.append({
-            'person_name': row[0],
-            'document_no': row[1],
-            'document_title': row[2],
-            'pdf_filename': row[3],
-            'base_salary': float(row[4]) if row[4] else 0,
-            'edu_salary': float(row[5]) if row[5] else 0,
-            'skill_salary': float(row[6]) if row[6] else 0,
-            'seniority_salary': float(row[7]) if row[7] else 0,
-            'guarantee_salary': float(row[8]) if row[8] else 0,
-            'settlement_fee': float(row[9]) if row[9] else 0,
-            'talent_allowance': float(row[10]) if row[10] else 0,
-            'effective_date': str(row[11]) if row[11] else None,
+            'person_name': row.get('person_name'),
+            'document_no': row.get('document_no'),
+            'document_title': row.get('document_title'),
+            'pdf_filename': row.get('pdf_filename'),
+            'base_salary': float(row.get('base_salary') or 0),
+            'edu_salary': float(row.get('edu_salary') or 0),
+            'skill_salary': float(row.get('skill_salary') or 0),
+            'seniority_salary': float(row.get('seniority_salary') or 0),
+            'guarantee_salary': float(row.get('guarantee_salary') or 0),
+            'settlement_fee': float(row.get('settlement_fee') or 0),
+            'talent_allowance': float(row.get('talent_allowance') or 0),
+            'effective_date': str(row.get('effective_date')) if row.get('effective_date') else None,
             'pdf_url': pdf_url
         })
     
