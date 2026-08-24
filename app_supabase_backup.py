@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""安装公司人员信息管理系统 - 腾讯云云开发NoSQL版"""
+"""安装公司人员信息管理系统 - Supabase版"""
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime, timedelta
 import hashlib
-from tcb_config import tcb_query, tcb_count, tcb_add, tcb_update, tcb_delete
+from supabase_config import get_db, init_db
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 CORS(app, expose_headers=['X-User-Phone'])
+
+# 初始化数据库
+init_db()
 
 # ============= 权限管理 =============
 
@@ -18,8 +22,13 @@ def get_current_user():
     phone = request.headers.get('X-User-Phone', '')
     if not phone:
         return None
-    results = tcb_query("users", {"phone": phone}, limit=1)
-    return results[0] if results else None
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT phone, name, is_admin FROM users WHERE phone=%s", (phone,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+    return user
 
 def mask_person_data(p, is_self=False, is_admin=False):
     """根据权限过滤人员数据"""
@@ -105,7 +114,10 @@ def auto_restore_on_duty():
         now_bj = datetime.utcnow() + timedelta(hours=8)
         today_str = now_bj.strftime('%Y-%m-%d')
 
-        rows = tcb_query("personnel", {"status": {"$in": ["出差", "休假"]}})
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, status, status_detail FROM personnel WHERE status IN ('出差','休假')")
+        rows = cur.fetchall()
 
         restored = []
         for row in rows:
@@ -115,10 +127,13 @@ def auto_restore_on_duty():
             if m:
                 end_date = m.group(1)
                 if today_str > end_date:
-                    tcb_update("personnel", {"id": row['id']},
-                               {"status": "在岗", "status_detail": "", "updated_at": datetime.now().isoformat()})
+                    cur.execute("UPDATE personnel SET status='在岗', status_detail='', updated_at=NOW() WHERE id=%s", (row['id'],))
                     restored.append(row['id'])
 
+        if restored:
+            conn.commit()
+        cur.close()
+        conn.close()
         return restored
     except Exception as e:
         print(f"auto_restore_on_duty error: {e}")
@@ -130,19 +145,24 @@ def get_personnel():
     # 自动恢复过期的出差/休假人员
     auto_restore_on_duty()
 
+    conn = get_db()
+    cur = conn.cursor()
+    
     category = request.args.get('category', 'all')
     search = request.args.get('search', '').strip()
     
     if category == 'formal':
-        people = tcb_query("personnel", {"category": "正式职工"})
+        cur.execute("SELECT * FROM personnel WHERE category='正式职工'")
     elif category == 'outsourced':
-        people = tcb_query("personnel", {"category": {"$in": ["C1", "C2"]}})
+        cur.execute("SELECT * FROM personnel WHERE category IN ('C1','C2')")
     elif category == 'C1':
-        people = tcb_query("personnel", {"category": "C1"})
+        cur.execute("SELECT * FROM personnel WHERE category='C1'")
     elif category == 'C2':
-        people = tcb_query("personnel", {"category": "C2"})
+        cur.execute("SELECT * FROM personnel WHERE category='C2'")
     else:
-        people = tcb_query("personnel")
+        cur.execute("SELECT * FROM personnel")
+    
+    people = cur.fetchall()
     
     if search:
         key = search.lower()
@@ -190,9 +210,14 @@ def get_personnel():
     # 找到当前用户的personnel_id
     current_person_id = None
     if current_user_phone:
-        person_rows = tcb_query("personnel", {"phone": current_user_phone}, limit=1)
-        if person_rows:
-            current_person_id = person_rows[0]['id']
+        conn2 = get_db()
+        cur2 = conn2.cursor()
+        cur2.execute("SELECT id FROM personnel WHERE phone=%s", (current_user_phone,))
+        row = cur2.fetchone()
+        if row:
+            current_person_id = row['id']
+        cur2.close()
+        conn2.close()
     
     # 转换为JSON格式
     result = []
@@ -200,13 +225,19 @@ def get_personnel():
         is_self = (p['id'] == current_person_id)
         result.append(mask_person_data(p, is_self=is_self, is_admin=is_admin))
     
+    cur.close()
+    conn.close()
     return jsonify(result)
 
 @app.route('/api/personnel/<person_id>')
 def get_person(person_id):
     """获取单个人员详情"""
-    results = tcb_query("personnel", {"id": person_id}, limit=1)
-    p = results[0] if results else None
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM personnel WHERE id=%s", (person_id,))
+    p = cur.fetchone()
+    cur.close()
+    conn.close()
     
     if not p:
         return jsonify({'error': '未找到该人员'}), 404
@@ -228,24 +259,22 @@ def add_person():
         return jsonify({'error': '姓名不能为空'}), 400
     
     try:
+        conn = get_db()
+        cur = conn.cursor()
+        
         # 生成ID（找最大编号+1，避免重复）
         cat = data.get('category', '正式职工')
-        prefix = 'F' if cat == '正式职工' else 'O'
-        
-        # 查询同前缀的所有人员，找出最大编号
-        all_same_prefix = tcb_query("personnel", {"id": {"$regex": f"^{prefix}"}})
-        if all_same_prefix:
-            max_num = 0
-            for r in all_same_prefix:
-                try:
-                    num = int(r['id'][1:])
-                    if num > max_num:
-                        max_num = num
-                except:
-                    pass
-            pid = f"{prefix}{max_num + 1}"
+        if cat == '正式职工':
+            cur.execute("SELECT id FROM personnel WHERE id LIKE 'F%' ORDER BY CAST(SUBSTRING(id FROM 2) AS INTEGER) DESC LIMIT 1")
         else:
-            pid = f"{prefix}1"
+            cur.execute("SELECT id FROM personnel WHERE id LIKE 'O%' ORDER BY CAST(SUBSTRING(id FROM 2) AS INTEGER) DESC LIMIT 1")
+        
+        row = cur.fetchone()
+        if row and row['id']:
+            max_num = int(row['id'][1:])
+            pid = f"{'F' if cat == '正式职工' else 'O'}{max_num + 1}"
+        else:
+            pid = f"{'F' if cat == '正式职工' else 'O'}1"
         
         # salary转数字，空字符串转None
         salary = data.get('salary')
@@ -257,30 +286,19 @@ def add_person():
             except:
                 salary = None
         
-        new_doc = {
-            "id": pid,
-            "name": data['name'],
-            "gender": data.get('gender', ''),
-            "id_card": data.get('id_card', ''),
-            "birth": data.get('birth', ''),
-            "edu": data.get('edu', ''),
-            "hometown": data.get('hometown', ''),
-            "position": data.get('position', ''),
-            "dept": data.get('dept', ''),
-            "project": data.get('project', '未分配'),
-            "phone": data.get('phone', ''),
-            "cert": data.get('cert', ''),
-            "category": cat,
-            "salary": salary,
-            "hire_date": data.get('hire_date', '') or None,
-            "status": "在岗",
-            "status_detail": "",
-            "leave_date": "",
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
+        cur.execute("""
+            INSERT INTO personnel (id, name, gender, id_card, birth, edu, hometown, position, dept, project, phone, cert, category, salary, hire_date)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (pid, data['name'], data.get('gender',''), data.get('id_card',''),
+              data.get('birth',''), data.get('edu',''), data.get('hometown',''),
+              data.get('position',''), data.get('dept',''),
+              data.get('project','未分配'),
+              data.get('phone',''), data.get('cert',''), cat, salary,
+              data.get('hire_date', '') or None))
         
-        tcb_add("personnel", new_doc)
+        conn.commit()
+        cur.close()
+        conn.close()
         return jsonify({'success': True, 'person': {'id': pid, **data}})
     except Exception as e:
         print(f"add_person error: {e}")
@@ -292,24 +310,33 @@ def update_person(person_id):
     data = request.json
     
     try:
-        # 检查人员是否存在
-        existing = tcb_query("personnel", {"id": person_id}, limit=1)
-        if not existing:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT id FROM personnel WHERE id=%s", (person_id,))
+        if not cur.fetchone():
+            cur.close(); conn.close()
             return jsonify({'error': '未找到该人员'}), 404
         
-        update_fields = {}
+        fields = []
+        values = []
         for key in ['name','gender','id_card','birth','edu','hometown','position','dept','project','phone','cert','category','salary','status','status_detail','hire_date','leave_date']:
             if key in data:
                 val = data[key]
                 # salary空字符串转None
                 if key == 'salary' and (val == '' or val is None):
                     val = None
-                update_fields[key] = val
+                fields.append(f"{key}=%s")
+                values.append(val)
         
-        if update_fields:
-            update_fields["updated_at"] = datetime.now().isoformat()
-            tcb_update("personnel", {"id": person_id}, update_fields)
+        if fields:
+            fields.append("updated_at=NOW()")
+            values.append(person_id)
+            cur.execute(f"UPDATE personnel SET {','.join(fields)} WHERE id=%s", values)
+            conn.commit()
         
+        cur.close()
+        conn.close()
         return jsonify({'success': True})
     except Exception as e:
         print(f"update_person error: {e}")
@@ -318,7 +345,12 @@ def update_person(person_id):
 @app.route('/api/personnel/<person_id>', methods=['DELETE'])
 def delete_person(person_id):
     """删除人员"""
-    tcb_delete("personnel", {"id": person_id})
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM personnel WHERE id=%s", (person_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({'success': True})
 
 # ============= 状态管理API =============
@@ -327,17 +359,24 @@ def delete_person(person_id):
 def update_status(person_id):
     """更新人员状态"""
     data = request.json
-    tcb_update("personnel", {"id": person_id},
-               {"status": data.get('status', '在岗'),
-                "status_detail": data.get('detail', ''),
-                "updated_at": datetime.now().isoformat()})
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE personnel SET status=%s, status_detail=%s, updated_at=NOW() WHERE id=%s",
+                (data.get('status','在岗'), data.get('detail',''), person_id))
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({'success': True})
 
 @app.route('/api/personnel/<person_id>/return', methods=['PUT'])
 def person_return(person_id):
     """归队/销假"""
-    tcb_update("personnel", {"id": person_id},
-               {"status": "在岗", "status_detail": "", "updated_at": datetime.now().isoformat()})
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE personnel SET status='在岗', status_detail='', updated_at=NOW() WHERE id=%s", (person_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({'success': True})
 
 @app.route('/api/personnel/<person_id>/resign', methods=['PUT'])
@@ -345,15 +384,20 @@ def person_resign(person_id):
     """离职：设置leave_date和状态为已离职"""
     try:
         data = request.json or {}
+        conn = get_db()
+        cur = conn.cursor()
 
-        existing = tcb_query("personnel", {"id": person_id}, limit=1)
-        if not existing:
+        cur.execute("SELECT id FROM personnel WHERE id=%s", (person_id,))
+        if not cur.fetchone():
+            cur.close(); conn.close()
             return jsonify({'error': '未找到该人员'}), 404
 
         leave_date = data.get('leave_date', '') or datetime.utcnow().strftime('%Y-%m-%d')
-        tcb_update("personnel", {"id": person_id},
-                   {"status": "已离职", "leave_date": leave_date,
-                    "status_detail": "", "updated_at": datetime.now().isoformat()})
+        cur.execute("UPDATE personnel SET status='已离职', leave_date=%s, status_detail='', updated_at=NOW() WHERE id=%s",
+                    (leave_date, person_id))
+        conn.commit()
+        cur.close()
+        conn.close()
         return jsonify({'success': True})
     except Exception as e:
         print(f"person_resign error: {e}")
@@ -364,16 +408,20 @@ def person_hire(person_id):
     """入职/重新入职：设置hire_date和状态为在岗"""
     try:
         data = request.json or {}
+        conn = get_db()
+        cur = conn.cursor()
 
-        existing = tcb_query("personnel", {"id": person_id}, limit=1)
-        if not existing:
+        cur.execute("SELECT id FROM personnel WHERE id=%s", (person_id,))
+        if not cur.fetchone():
+            cur.close(); conn.close()
             return jsonify({'error': '未找到该人员'}), 404
 
         hire_date = data.get('hire_date', '') or datetime.utcnow().strftime('%Y-%m-%d')
-        tcb_update("personnel", {"id": person_id},
-                   {"status": "在岗", "hire_date": hire_date,
-                    "leave_date": None, "status_detail": "",
-                    "updated_at": datetime.now().isoformat()})
+        cur.execute("UPDATE personnel SET status='在岗', hire_date=%s, leave_date=NULL, status_detail='', updated_at=NOW() WHERE id=%s",
+                    (hire_date, person_id))
+        conn.commit()
+        cur.close()
+        conn.close()
         return jsonify({'success': True})
     except Exception as e:
         print(f"person_hire error: {e}")
@@ -394,9 +442,13 @@ def get_leave_balance(person_id):
         import re
         from datetime import datetime as dt
         
-        results = tcb_query("personnel", {"id": person_id}, limit=1)
-        person = results[0] if results else None
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("SELECT * FROM personnel WHERE id=%s", (person_id,))
+        person = cur.fetchone()
         if not person:
+            cur.close(); conn.close()
             return jsonify({'error': '未找到该人员'}), 404
         
         # 权限检查：仅本人或管理员可查看假期余额
@@ -404,6 +456,7 @@ def get_leave_balance(person_id):
         is_admin = current_user and current_user.get('is_admin', False)
         is_self = current_user and current_user.get('phone') == person.get('phone')
         if not is_admin and not is_self:
+            cur.close(); conn.close()
             return jsonify({'error': '无权限查看'}), 403
         
         category = person.get('category', '')
@@ -415,12 +468,22 @@ def get_leave_balance(person_id):
         
         # 计算工龄（正式职工用参加工作时间，外包用入职时间）
         work_years = 0
-        if hire_date:
-            try:
-                hd = dt.strptime(hire_date[:10], '%Y-%m-%d')
-                work_years = (now - hd).days / 365.25
-            except:
-                work_years = 0
+        if category == '正式职工':
+            # 正式职工从出生+22岁估算，或从hire_date
+            if hire_date:
+                try:
+                    hd = dt.strptime(hire_date[:10], '%Y-%m-%d')
+                    work_years = (now - hd).days / 365.25
+                except:
+                    work_years = 0
+        else:
+            # 外包人员从hire_date算
+            if hire_date:
+                try:
+                    hd = dt.strptime(hire_date[:10], '%Y-%m-%d')
+                    work_years = (now - hd).days / 365.25
+                except:
+                    work_years = 0
         
         # 年休假天数
         annual_leave = 0
@@ -442,15 +505,12 @@ def get_leave_balance(person_id):
             family_leave = 30  # 默认探配偶30天
         
         # 统计当年已使用假期
-        year_start = f'{current_year}-01-01'
-        year_end = f'{current_year + 1}-01-01'
-        all_leave_records = tcb_query("leave_records", {
-            "person_id": person_id,
-            "status": "已通过"
-        })
-        # Python端过滤日期范围
-        used_records = [r for r in all_leave_records
-                        if r.get('start_date', '') >= year_start and r.get('start_date', '') < year_end]
+        cur.execute("""
+            SELECT reason, start_date, end_date FROM leave_records 
+            WHERE person_id=%s AND status='已通过' 
+            AND start_date >= %s AND start_date < %s
+        """, (person_id, f'{current_year}-01-01', f'{current_year + 1}-01-01'))
+        used_records = cur.fetchall()
         
         used_annual = 0
         used_family = 0
@@ -475,6 +535,12 @@ def get_leave_balance(person_id):
             else:
                 used_other += days
         
+        cur.close()
+        conn.close()
+        
+        # 从考勤表统计（更准确）
+        # 先用leave_records的统计
+        
         result = {
             'person_id': person_id,
             'name': person['name'],
@@ -493,6 +559,7 @@ def get_leave_balance(person_id):
             })
         
         if category == '正式职工' and family_leave > 0:
+            family_used_flag = 1 if used_family > 0 else 0
             result['leave_types'].append({
                 'type': '探亲假（探配偶）',
                 'total': f'{family_leave}天/年（一次）',
@@ -522,22 +589,21 @@ def get_all_leave_balance():
     try:
         from datetime import datetime as dt
         
-        # 获取未离职人员
-        all_people = tcb_query("personnel")
-        people = [p for p in all_people if p.get('status', '') != '已离职']
-        # 排序
-        people.sort(key=lambda p: (p.get('category', ''), p.get('name', '')))
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("SELECT * FROM personnel WHERE status != '已离职' ORDER BY category, name")
+        people = cur.fetchall()
         
         now = dt.now()
         current_year = now.year
         
         # 获取当年所有已审批休假
-        year_start = f'{current_year}-01-01'
-        year_end = f'{current_year + 1}-01-01'
-        all_leave_records = tcb_query("leave_records", {"status": "已通过"})
-        # Python端过滤日期范围
-        all_used = [r for r in all_leave_records
-                    if r.get('start_date', '') >= year_start and r.get('start_date', '') < year_end]
+        cur.execute("""
+            SELECT person_id, reason, start_date, end_date FROM leave_records 
+            WHERE status='已通过' AND start_date >= %s AND start_date < %s
+        """, (f'{current_year}-01-01', f'{current_year + 1}-01-01'))
+        all_used = cur.fetchall()
         
         # 按人员分组
         used_map = {}
@@ -598,6 +664,8 @@ def get_all_leave_balance():
             
             results.append(entry)
         
+        cur.close()
+        conn.close()
         return jsonify(results)
     except Exception as e:
         print(f"all_leave_balance error: {e}")
@@ -608,16 +676,19 @@ def get_all_leave_balance():
 @app.route('/api/transfers')
 def get_transfers():
     """获取调动记录"""
+    conn = get_db()
+    cur = conn.cursor()
     person_id = request.args.get('person_id')
     
     if person_id:
-        records = tcb_query("transfers", {"person_id": person_id})
+        cur.execute("SELECT * FROM transfers WHERE person_id=%s ORDER BY created_at DESC", (person_id,))
     else:
-        records = tcb_query("transfers")
+        cur.execute("SELECT * FROM transfers ORDER BY created_at DESC")
     
-    # 按created_at倒序排列
-    records.sort(key=lambda r: r.get('created_at', ''), reverse=True)
-    return jsonify(records)
+    records = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(r) for r in records])
 
 @app.route('/api/transfers', methods=['POST'])
 def add_transfer():
@@ -626,53 +697,58 @@ def add_transfer():
     if not data.get('person_id') or not data.get('to_project'):
         return jsonify({'error': '信息不完整'}), 400
     
+    conn = get_db()
+    cur = conn.cursor()
+    
     # 获取原项目
-    person_results = tcb_query("personnel", {"id": data['person_id']}, limit=1)
-    person = person_results[0] if person_results else None
+    cur.execute("SELECT project FROM personnel WHERE id=%s", (data['person_id'],))
+    person = cur.fetchone()
     from_project = person['project'] if person else ''
     
     # 生成ID
-    count = tcb_count("transfers")
-    tid = f"T{count + 1}"
+    cur.execute("SELECT COUNT(*) FROM transfers")
+    tid = f"T{cur.fetchone()['count'] + 1}"
     
-    transfer_doc = {
-        "id": tid,
-        "person_id": data['person_id'],
-        "person_name": data.get('person_name', ''),
-        "from_project": from_project,
-        "to_project": data['to_project'],
-        "transfer_date": data.get('transfer_date', ''),
-        "notes": data.get('notes', ''),
-        "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }
-    tcb_add("transfers", transfer_doc)
+    cur.execute("""
+        INSERT INTO transfers (id, person_id, person_name, from_project, to_project, transfer_date, notes, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (tid, data['person_id'], data.get('person_name',''), from_project,
+          data['to_project'], data.get('transfer_date',''), data.get('notes',''),
+          datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
     
     # 更新人员项目
-    tcb_update("personnel", {"id": data['person_id']},
-               {"project": data['to_project'], "updated_at": datetime.now().isoformat()})
+    cur.execute("UPDATE personnel SET project=%s, updated_at=NOW() WHERE id=%s",
+                (data['to_project'], data['person_id']))
     
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({'success': True, 'transfer': {'id': tid, **data}})
 
 @app.route('/api/personnel/<person_id>/timeline')
 def get_timeline(person_id):
     """获取项目时间线"""
-    transfers = tcb_query("transfers", {"person_id": person_id})
-    # 按transfer_date排序
-    transfers.sort(key=lambda t: t.get('transfer_date', ''))
+    conn = get_db()
+    cur = conn.cursor()
     
-    person_results = tcb_query("personnel", {"id": person_id}, limit=1)
-    person = person_results[0] if person_results else None
+    cur.execute("SELECT * FROM transfers WHERE person_id=%s ORDER BY transfer_date", (person_id,))
+    transfers = cur.fetchall()
+    
+    cur.execute("SELECT project FROM personnel WHERE id=%s", (person_id,))
+    person = cur.fetchone()
     current_project = person['project'] if person else '未分配'
     
     timeline = []
     if not transfers:
         timeline.append({'project': current_project, 'start_date': '至今', 'end_date': '至今', 'months': 12})
     
+    cur.close()
+    conn.close()
     return jsonify({
         'person_id': person_id,
         'current_project': current_project,
         'timeline': timeline,
-        'transfers': transfers
+        'transfers': [dict(t) for t in transfers]
     })
 
 # ============= 休假申请API =============
@@ -680,16 +756,19 @@ def get_timeline(person_id):
 @app.route('/api/leave')
 def get_leave():
     """获取休假申请"""
+    conn = get_db()
+    cur = conn.cursor()
     person_id = request.args.get('person_id')
     
     if person_id:
-        records = tcb_query("leave_records", {"person_id": person_id})
+        cur.execute("SELECT * FROM leave_records WHERE person_id=%s ORDER BY created_at DESC", (person_id,))
     else:
-        records = tcb_query("leave_records")
+        cur.execute("SELECT * FROM leave_records ORDER BY created_at DESC")
     
-    # 按created_at倒序排列
-    records.sort(key=lambda r: r.get('created_at', ''), reverse=True)
-    return jsonify(records)
+    records = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(r) for r in records])
 
 @app.route('/api/leave', methods=['POST'])
 def add_leave():
@@ -698,45 +777,51 @@ def add_leave():
     if not data.get('person_id') or not data.get('start_date') or not data.get('end_date'):
         return jsonify({'error': '信息不完整'}), 400
     
-    count = tcb_count("leave_records")
-    lid = f"L{count + 1}"
+    conn = get_db()
+    cur = conn.cursor()
     
-    leave_doc = {
-        "id": lid,
-        "person_id": data['person_id'],
-        "person_name": data.get('person_name', ''),
-        "start_date": data['start_date'],
-        "end_date": data['end_date'],
-        "reason": data.get('reason', ''),
-        "status": "待审批",
-        "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }
-    tcb_add("leave_records", leave_doc)
+    cur.execute("SELECT COUNT(*) FROM leave_records")
+    lid = f"L{cur.fetchone()['count'] + 1}"
     
+    cur.execute("""
+        INSERT INTO leave_records (id, person_id, person_name, start_date, end_date, reason, status, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (lid, data['person_id'], data.get('person_name',''),
+          data['start_date'], data['end_date'], data.get('reason',''),
+          '待审批', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({'success': True, 'record': {'id': lid, **data}})
 
 @app.route('/api/leave/<record_id>/approve', methods=['PUT'])
 def approve_leave(record_id):
     """审批休假"""
-    # 先更新休假记录状态
-    tcb_update("leave_records", {"id": record_id}, {"status": "已通过"})
+    conn = get_db()
+    cur = conn.cursor()
     
-    # 获取记录详情以更新人员状态
-    records = tcb_query("leave_records", {"id": record_id}, limit=1)
-    record = records[0] if records else None
+    cur.execute("UPDATE leave_records SET status='已通过' WHERE id=%s RETURNING person_id, end_date", (record_id,))
+    record = cur.fetchone()
     
     if record:
-        tcb_update("personnel", {"id": record['person_id']},
-                   {"status": "休假",
-                    "status_detail": f"休假至{record['end_date']}",
-                    "updated_at": datetime.now().isoformat()})
+        cur.execute("UPDATE personnel SET status='休假', status_detail=%s, updated_at=NOW() WHERE id=%s",
+                    (f"休假至{record['end_date']}", record['person_id']))
+        conn.commit()
     
+    cur.close()
+    conn.close()
     return jsonify({'success': True})
 
 @app.route('/api/leave/<record_id>/reject', methods=['PUT'])
 def reject_leave(record_id):
     """驳回休假"""
-    tcb_update("leave_records", {"id": record_id}, {"status": "已驳回"})
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE leave_records SET status='已驳回' WHERE id=%s", (record_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({'success': True})
 
 # ============= 出差单API =============
@@ -744,16 +829,19 @@ def reject_leave(record_id):
 @app.route('/api/trip')
 def get_trips():
     """获取出差单"""
+    conn = get_db()
+    cur = conn.cursor()
     person_id = request.args.get('person_id')
     
     if person_id:
-        records = tcb_query("trip_records", {"person_id": person_id})
+        cur.execute("SELECT * FROM trip_records WHERE person_id=%s ORDER BY created_at DESC", (person_id,))
     else:
-        records = tcb_query("trip_records")
+        cur.execute("SELECT * FROM trip_records ORDER BY created_at DESC")
     
-    # 按created_at倒序排列
-    records.sort(key=lambda r: r.get('created_at', ''), reverse=True)
-    return jsonify(records)
+    records = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(r) for r in records])
 
 @app.route('/api/trip', methods=['POST'])
 def add_trip():
@@ -762,50 +850,57 @@ def add_trip():
     if not data.get('person_id') or not data.get('destination'):
         return jsonify({'error': '信息不完整'}), 400
     
-    count = tcb_count("trip_records")
-    bid = f"B{count + 1}"
+    conn = get_db()
+    cur = conn.cursor()
     
-    trip_doc = {
-        "id": bid,
-        "person_id": data['person_id'],
-        "person_name": data.get('person_name', ''),
-        "destination": data['destination'],
-        "start_date": data.get('start_date', ''),
-        "end_date": data.get('end_date', ''),
-        "reason": data.get('reason', ''),
-        "status": "待审批",
-        "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }
-    tcb_add("trip_records", trip_doc)
+    cur.execute("SELECT COUNT(*) FROM trip_records")
+    bid = f"B{cur.fetchone()['count'] + 1}"
     
+    cur.execute("""
+        INSERT INTO trip_records (id, person_id, person_name, destination, start_date, end_date, reason, status, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (bid, data['person_id'], data.get('person_name',''),
+          data['destination'], data.get('start_date',''), data.get('end_date',''),
+          data.get('reason',''), '待审批', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({'success': True, 'record': {'id': bid, **data}})
 
 @app.route('/api/trip/<record_id>/approve', methods=['PUT'])
 def approve_trip(record_id):
     """审批出差"""
-    # 更新出差记录状态
-    tcb_update("trip_records", {"id": record_id}, {"status": "已通过"})
+    conn = get_db()
+    cur = conn.cursor()
     
-    # 获取记录详情
-    records = tcb_query("trip_records", {"id": record_id}, limit=1)
-    record = records[0] if records else None
+    cur.execute("UPDATE trip_records SET status='已通过' WHERE id=%s RETURNING person_id, destination", (record_id,))
+    record = cur.fetchone()
     
     if record:
         # 获取出差结束日期用于自动恢复
+        cur.execute("SELECT end_date FROM trip_records WHERE id=%s", (record_id,))
+        trip = cur.fetchone()
         end_str = ''
-        if record.get('end_date'):
-            end_str = f"(至{record['end_date']})"
-        tcb_update("personnel", {"id": record['person_id']},
-                   {"status": "出差",
-                    "status_detail": f"出差-{record['destination']}{end_str}",
-                    "updated_at": datetime.now().isoformat()})
+        if trip and trip.get('end_date'):
+            end_str = f"(至{trip['end_date']})"
+        cur.execute("UPDATE personnel SET status='出差', status_detail=%s, updated_at=NOW() WHERE id=%s",
+                    (f"出差-{record['destination']}{end_str}", record['person_id']))
+        conn.commit()
     
+    cur.close()
+    conn.close()
     return jsonify({'success': True})
 
 @app.route('/api/trip/<record_id>/reject', methods=['PUT'])
 def reject_trip(record_id):
     """驳回出差"""
-    tcb_update("trip_records", {"id": record_id}, {"status": "已驳回"})
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE trip_records SET status='已驳回' WHERE id=%s", (record_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
     return jsonify({'success': True})
 
 # ============= 统计API =============
@@ -813,14 +908,26 @@ def reject_trip(record_id):
 @app.route('/api/statistics')
 def get_statistics():
     """获取统计数据"""
-    all_people = tcb_query("personnel")
+    conn = get_db()
+    cur = conn.cursor()
     
-    total = len(all_people)
-    formal = len([p for p in all_people if p.get('category') == '正式职工'])
-    c1 = len([p for p in all_people if p.get('category') == 'C1'])
-    c2 = len([p for p in all_people if p.get('category') == 'C2'])
-    male = len([p for p in all_people if p.get('gender') == '男'])
-    female = len([p for p in all_people if p.get('gender') == '女'])
+    cur.execute("SELECT COUNT(*) as total FROM personnel")
+    total = cur.fetchone()['total']
+    
+    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE category='正式职工'")
+    formal = cur.fetchone()['c']
+    
+    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE category='C1'")
+    c1 = cur.fetchone()['c']
+    
+    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE category='C2'")
+    c2 = cur.fetchone()['c']
+    
+    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE gender='男'")
+    male = cur.fetchone()['c']
+    
+    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE gender='女'")
+    female = cur.fetchone()['c']
     
     # 学历统计
     def map_edu(edu):
@@ -831,19 +938,18 @@ def get_statistics():
         if any(k in edu for k in ['中专','初中','高中']): return '高中及以下'
         return '未知'
     
+    cur.execute("SELECT edu FROM personnel")
     edu_stats = {}
-    for p in all_people:
-        cat = map_edu(p.get('edu', ''))
+    for row in cur.fetchall():
+        cat = map_edu(row['edu'])
         edu_stats[cat] = edu_stats.get(cat, 0) + 1
     
-    # 项目统计（仅正式职工）
-    dept_stats = {}
-    for p in all_people:
-        if p.get('category') == '正式职工':
-            proj = p.get('project', '') or ''
-            dept_stats[proj] = dept_stats.get(proj, 0) + 1
+    # 项目统计
+    cur.execute("SELECT project, COUNT(*) as c FROM personnel WHERE category='正式职工' GROUP BY project")
+    dept_stats = {row['project']: row['c'] for row in cur.fetchall()}
     
     # 证书统计
+    cur.execute("SELECT name, cert FROM personnel")
     cert_stats = {
         '一建': {'count': 0, 'persons': []},
         '一造': {'count': 0, 'persons': []},
@@ -858,9 +964,9 @@ def get_statistics():
     # 八大员证书关键词分类
     badayuan_types = ['质量员', '施工员', '安全员', '测量员', '资料员', '材料员', '机械员', '劳务员', '标准员', '试验员']
     
-    for p in all_people:
-        name = p.get('name', '')
-        cert = p.get('cert', '')
+    for row in cur.fetchall():
+        name = row['name']
+        cert = row['cert']
         if cert and cert.strip() and cert != '/':
             total_with_cert += 1
             if '一建' in cert or '一级建造师' in cert:
@@ -894,19 +1000,21 @@ def get_statistics():
             cert_stats['无证书']['persons'].append(name)
     
     # 一建指标
-    exam_targets = tcb_query("exam_targets", {"exam_type": "一建"}, limit=1)
-    exam_row = exam_targets[0] if exam_targets else None
+    cur.execute("SELECT * FROM exam_targets WHERE exam_type='一建' LIMIT 1")
+    exam_row = cur.fetchone()
     exam_target = None
     if exam_row:
-        persons_results = tcb_query("exam_target_persons", {"target_id": exam_row['id']})
-        persons_results.sort(key=lambda r: r.get('id', ''))
-        persons = [r['person_name'] for r in persons_results]
+        cur.execute("SELECT person_name FROM exam_target_persons WHERE target_id=%s ORDER BY id", (exam_row['id'],))
+        persons = [r['person_name'] for r in cur.fetchall()]
         exam_target = {
             'id': exam_row['id'],
             'exam_type': exam_row['exam_type'],
             'year': exam_row['year'],
             'persons': persons
         }
+    
+    cur.close()
+    conn.close()
     
     return jsonify({
         'total': total,
@@ -932,7 +1040,12 @@ def export_data():
         from openpyxl.styles import Font, Alignment, Border, Side
         from flask import send_file
         
-        people = tcb_query("personnel")
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM personnel")
+        people = cur.fetchall()
+        cur.close()
+        conn.close()
         
         # 排序（与小程序一致）
         def sort_key(p):
@@ -1038,15 +1151,15 @@ def export_data():
 @app.route('/api/exam-targets', methods=['GET'])
 def get_exam_targets():
     """获取一建指标"""
-    targets = tcb_query("exam_targets", limit=1)
-    # 按year倒序取最新
-    targets.sort(key=lambda t: t.get('year', 0), reverse=True)
-    target = targets[0] if targets else None
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT * FROM exam_targets ORDER BY year DESC LIMIT 1")
+    target = cur.fetchone()
     
     if target:
-        persons_results = tcb_query("exam_target_persons", {"target_id": target['id']})
-        persons_results.sort(key=lambda r: r.get('id', ''))
-        persons = [r['person_name'] for r in persons_results]
+        cur.execute("SELECT person_name FROM exam_target_persons WHERE target_id=%s ORDER BY id", (target['id'],))
+        persons = [r['person_name'] for r in cur.fetchall()]
         result = {
             'id': target['id'],
             'exam_type': target['exam_type'],
@@ -1056,6 +1169,8 @@ def get_exam_targets():
     else:
         result = None
     
+    cur.close()
+    conn.close()
     return jsonify(result)
 
 @app.route('/api/exam-targets', methods=['POST'])
@@ -1066,37 +1181,36 @@ def save_exam_targets():
     year = data.get('year', 2026)
     persons = data.get('persons', [])
     
+    conn = get_db()
+    cur = conn.cursor()
+    
     try:
         # 查找或创建指标
-        existing = tcb_query("exam_targets", {"exam_type": exam_type, "year": year}, limit=1)
+        cur.execute("SELECT id FROM exam_targets WHERE exam_type=%s AND year=%s", (exam_type, year))
+        row = cur.fetchone()
         
-        if existing:
-            target_id = existing[0]['id']
+        if row:
+            target_id = row['id']
             # 更新时间
-            tcb_update("exam_targets", {"id": target_id}, {"updated_at": datetime.now().isoformat()})
+            cur.execute("UPDATE exam_targets SET updated_at=NOW() WHERE id=%s", (target_id,))
             # 删除旧人员
-            tcb_delete("exam_target_persons", {"target_id": target_id})
+            cur.execute("DELETE FROM exam_target_persons WHERE target_id=%s", (target_id,))
         else:
-            # 生成新ID
-            count = tcb_count("exam_targets")
-            target_id = f"ET{count + 1}"
-            tcb_add("exam_targets", {
-                "id": target_id,
-                "exam_type": exam_type,
-                "year": year,
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            })
+            cur.execute("INSERT INTO exam_targets (exam_type, year) VALUES (%s, %s) RETURNING id", (exam_type, year))
+            target_id = cur.fetchone()['id']
         
         # 插入新人员
         for name in persons:
-            tcb_add("exam_target_persons", {
-                "target_id": target_id,
-                "person_name": name
-            })
+            cur.execute("INSERT INTO exam_target_persons (target_id, person_name) VALUES (%s, %s)", (target_id, name))
         
+        conn.commit()
+        cur.close()
+        conn.close()
         return jsonify({'success': True})
     except Exception as e:
+        conn.rollback()
+        cur.close()
+        conn.close()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/login', methods=['POST'])
@@ -1109,8 +1223,12 @@ def login():
     if not phone or not password:
         return jsonify({'error': '手机号和密码不能为空'}), 400
     
-    results = tcb_query("users", {"phone": phone}, limit=1)
-    user = results[0] if results else None
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE phone=%s", (phone,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
     
     if not user:
         return jsonify({'error': '用户不存在'}), 401
@@ -1144,16 +1262,22 @@ def change_password():
         return jsonify({'error': '新密码至少6位'}), 400
     
     try:
-        results = tcb_query("users", {"phone": phone}, limit=1)
-        user = results[0] if results else None
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT password FROM users WHERE phone=%s", (phone,))
+        user = cur.fetchone()
         
         if not user:
+            cur.close(); conn.close()
             return jsonify({'error': '用户不存在'}), 404
         
         if user['password'] != old_password:
+            cur.close(); conn.close()
             return jsonify({'error': '原密码错误'}), 401
         
-        tcb_update("users", {"phone": phone}, {"password": new_password})
+        cur.execute("UPDATE users SET password=%s WHERE phone=%s", (new_password, phone))
+        conn.commit()
+        cur.close(); conn.close()
         return jsonify({'success': True, 'message': '密码修改成功'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1178,20 +1302,24 @@ def reset_password():
         return jsonify({'error': '超级管理员账号不能通过此方式重置密码，请联系系统管理员'}), 403
     
     try:
+        conn = get_db()
+        cur = conn.cursor()
+        
         # 验证管理员身份
-        admin_results = tcb_query("users", {"phone": admin_phone}, limit=1)
-        admin = admin_results[0] if admin_results else None
+        cur.execute("SELECT is_admin FROM users WHERE phone=%s", (admin_phone,))
+        admin = cur.fetchone()
         if not admin or not admin['is_admin']:
+            cur.close(); conn.close()
             return jsonify({'error': '无权限'}), 403
         
         # 重置为默认密码
-        tcb_update("users", {"phone": phone}, {"password": "123456"})
-        
-        # 检查用户是否存在
-        user_check = tcb_query("users", {"phone": phone}, limit=1)
-        if not user_check:
+        cur.execute("UPDATE users SET password='123456' WHERE phone=%s", (phone,))
+        if cur.rowcount == 0:
+            cur.close(); conn.close()
             return jsonify({'error': '用户不存在'}), 404
         
+        conn.commit()
+        cur.close(); conn.close()
         return jsonify({'success': True, 'message': '密码已重置为123456'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1205,25 +1333,33 @@ def get_salary(person_id):
     is_admin = current_user and current_user.get('is_admin', False)
     
     # 获取人员信息
-    person_results = tcb_query("personnel", {"id": person_id}, limit=1)
-    person = person_results[0] if person_results else None
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, phone FROM personnel WHERE id=%s", (person_id,))
+    person = cur.fetchone()
     
     if not person:
+        cur.close(); conn.close()
         return jsonify({'error': '未找到该人员'}), 404
     
     # 权限检查：仅本人或管理员
     is_self = current_user and current_user.get('phone') == person.get('phone')
     if not is_admin and not is_self:
+        cur.close(); conn.close()
         return jsonify({'error': '无权限查看'}), 403
     
     # 查询工资信息
-    salary_rows = tcb_query("salary", {"person_name": person['name']})
-    # 按effective_date倒序
-    salary_rows.sort(key=lambda r: str(r.get('effective_date', '')), reverse=True)
+    cur.execute("""
+        SELECT person_name, document_no, document_title, pdf_filename,
+            base_salary, edu_salary, skill_salary, seniority_salary, 
+            guarantee_salary, settlement_fee, talent_allowance, effective_date,
+            pdf_storage_path
+        FROM salary WHERE person_name=%s ORDER BY effective_date DESC
+    """, (person['name'],))
     
     SUPABASE_URL = "https://kohuwtvxfvgbjdbmszao.supabase.co"
     salary_records = []
-    for row in salary_rows:
+    for row in cur.fetchall():
         pdf_url = None
         if row.get('pdf_storage_path'):
             pdf_url = f"{SUPABASE_URL}/storage/v1/object/public/salary-pdfs/{row['pdf_storage_path']}"
@@ -1244,6 +1380,7 @@ def get_salary(person_id):
             'pdf_url': pdf_url
         })
     
+    cur.close(); conn.close()
     return jsonify({'salary_records': salary_records})
 
 @app.route('/api/salary/pdf/<filename>')
@@ -1273,8 +1410,11 @@ def get_salary_pdf(filename):
     name_match = re.search(r'关于(.{2,4})(内部调动|毕业分配|职务任免|转正定职|技术职务聘任)', filename)
     if name_match:
         person_name = name_match.group(1)
-        person_results = tcb_query("personnel", {"name": person_name}, limit=1)
-        person = person_results[0] if person_results else None
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT phone FROM personnel WHERE name=%s", (person_name,))
+        person = cur.fetchone()
+        cur.close(); conn.close()
         
         is_self = person and current_user.get('phone') == person.get('phone')
         is_admin = current_user.get('is_admin', False)
