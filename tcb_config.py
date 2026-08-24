@@ -2,7 +2,7 @@
 import requests, json, time, os
 
 APP_ID = "wx7673bf714bb43454"
-ENV_ID = "personnel-api-301820-4-1473833407"
+ENV_ID = "personnel-api-d0gsohasr28067fae"
 
 def _get_secret():
     # 先从环境变量读取
