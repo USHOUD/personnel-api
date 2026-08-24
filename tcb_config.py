@@ -2,12 +2,19 @@
 import requests, json, time, os
 
 APP_ID = "wx7673bf714bb43454"
-ENV_ID = "personnel-api-d0gsohasr28067fae"
+ENV_ID = "personnel-api-301820-4-1473833407"
 
 def _get_secret():
+    # 先从环境变量读取
+    secret = os.environ.get("APP_SECRET", "")
+    if secret:
+        return secret
+    # 再从文件读取
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".secret")
-    with open(p) as f:
-        return f.read().strip()
+    if os.path.exists(p):
+        with open(p) as f:
+            return f.read().strip()
+    raise Exception("APP_SECRET not found")
 
 _token_cache = {"t": None, "e": 0}
 
