@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-import requests, json, time, os
+import requests, json, time
 
 APP_ID = "wx7673bf714bb43454"
+APP_SECRET = "f2dcb28ae2c10698630f574ede50a681"
 ENV_ID = "personnel-api-d0gsohasr28067fae"
-
-def _get_secret():
-    # 先从环境变量读取
-    secret = os.environ.get("APP_SECRET", "")
-    if secret:
-        return secret
-    # 再从文件读取
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".secret")
-    if os.path.exists(p):
-        with open(p) as f:
-            return f.read().strip()
-    raise Exception("APP_SECRET not found")
 
 _token_cache = {"t": None, "e": 0}
 
@@ -22,8 +11,7 @@ def get_access_token():
     now = time.time()
     if _token_cache["t"] and now < _token_cache["e"]:
         return _token_cache["t"]
-    secret = _get_secret()
-    r = requests.get("https://api.weixin.qq.com/cgi-bin/token", params={"grant_type":"client_credential","appid":APP_ID,"secret":secret}, timeout=10)
+    r = requests.get("https://api.weixin.qq.com/cgi-bin/token", params={"grant_type":"client_credential","appid":APP_ID,"secret":APP_SECRET}, timeout=10)
     d = r.json()
     if "access_token" in d:
         _token_cache["t"] = d["access_token"]
