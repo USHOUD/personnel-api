@@ -1507,3 +1507,170 @@ def migrate_to_tcb():
         results["personnel_error"] = str(e)
     
     return jsonify(results)
+
+
+# ============= 任务管理 =============
+
+@app.route('/api/tasks', methods=['GET'])
+def get_tasks():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    role = request.args.get('role', 'my')
+    phone = user['phone']
+    name = user['name']
+    cur.execute("SELECT dept, project FROM personnel WHERE phone=%s OR name=%s", (phone, name))
+    me = cur.fetchone()
+    my_dept = me['dept'] if me else ''
+    my_project = me['project'] if me else ''
+    if user.get('is_admin'):
+        cur.execute("SELECT * FROM tasks ORDER BY created_at DESC")
+    elif role == 'dept' and my_dept:
+        cur.execute("SELECT * FROM tasks WHERE dept=%s ORDER BY created_at DESC", (my_dept,))
+    elif role == 'project' and my_project:
+        cur.execute("SELECT * FROM tasks WHERE project=%s ORDER BY created_at DESC", (my_project,))
+    else:
+        cur.execute("SELECT * FROM tasks WHERE assignee=%s ORDER BY created_at DESC", (name,))
+    tasks = cur.fetchall()
+    for t in tasks:
+        t['created_at'] = str(t['created_at']) if t['created_at'] else ''
+        t['updated_at'] = str(t['updated_at']) if t['updated_at'] else ''
+    cur.close()
+    conn.close()
+    return jsonify(tasks)
+
+@app.route('/api/tasks', methods=['POST'])
+def create_task():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    data = request.json
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""INSERT INTO tasks (title, content, publisher, publisher_name, assignee, dept, project, deadline)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (data.get('title',''), data.get('content',''), user['phone'], user['name'],
+         data.get('assignee',''), data.get('dept',''), data.get('project',''), data.get('deadline','')))
+    task_id = cur.fetchone()['id']
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True, 'id': task_id})
+
+@app.route('/api/tasks/<int:task_id>', methods=['GET'])
+def get_task(task_id):
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+    task = cur.fetchone()
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+    task['created_at'] = str(task['created_at']) if task['created_at'] else ''
+    task['updated_at'] = str(task['updated_at']) if task['updated_at'] else ''
+    cur.execute("SELECT * FROM task_comments WHERE task_id=%s ORDER BY created_at", (task_id,))
+    comments = cur.fetchall()
+    for c in comments:
+        c['created_at'] = str(c['created_at']) if c['created_at'] else ''
+    cur.execute("SELECT * FROM task_reviews WHERE task_id=%s AND status='pending' ORDER BY created_at DESC LIMIT 1", (task_id,))
+    review = cur.fetchone()
+    if review:
+        review['created_at'] = str(review['created_at']) if review['created_at'] else ''
+    cur.close()
+    conn.close()
+    return jsonify({'task': task, 'comments': comments, 'pending_review': review})
+
+@app.route('/api/tasks/<int:task_id>/progress', methods=['PUT'])
+def update_progress(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    data = request.json
+    progress = data.get('progress', 0)
+    status = '已完成' if progress == 100 else '进行中'
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE tasks SET progress=%s, status=%s, updated_at=NOW() WHERE id=%s", (progress, status, task_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/tasks/<int:task_id>/submit', methods=['POST'])
+def submit_result(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    data = request.json
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""INSERT INTO task_reviews (task_id, submitted_by, requested_progress, file_names)
+        VALUES (%s, %s, %s, %s) RETURNING id""",
+        (task_id, user['name'], data.get('progress',0), data.get('file_names','')))
+    cur.execute("UPDATE tasks SET status='待审核', updated_at=NOW() WHERE id=%s", (task_id,))
+    cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+        VALUES (%s, %s, %s, 'submit')""",
+        (task_id, user['name'], '已上传成果文件，申请进度变更为{}%，请审核'.format(data.get('progress',0))))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/tasks/<int:task_id>/approve', methods=['PUT'])
+def approve_progress(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM task_reviews WHERE task_id=%s AND status='pending' ORDER BY created_at DESC LIMIT 1", (task_id,))
+    review = cur.fetchone()
+    if not review:
+        return jsonify({'error': '无待审核记录'}), 400
+    progress = review['requested_progress']
+    status = '已完成' if progress == 100 else '进行中'
+    cur.execute("UPDATE task_reviews SET status='approved', reviewer=%s, reviewed_at=NOW() WHERE id=%s", (user['name'], review['id']))
+    cur.execute("UPDATE tasks SET progress=%s, status=%s, updated_at=NOW() WHERE id=%s", (progress, status, task_id))
+    cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+        VALUES (%s, %s, %s, 'approve')""",
+        (task_id, user['name'], '审核通过，进度更新为{}%'.format(progress)))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/tasks/<int:task_id>/reject', methods=['PUT'])
+def reject_progress(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    data = request.json
+    reason = data.get('reason', '成果不符合要求')
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE task_reviews SET status='rejected', reviewer=%s, reject_reason=%s, reviewed_at=NOW() WHERE task_id=%s AND status='pending'", (user['name'], reason, task_id))
+    cur.execute("UPDATE tasks SET status='进行中', updated_at=NOW() WHERE id=%s", (task_id,))
+    cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+        VALUES (%s, %s, %s, 'reject')""",
+        (task_id, user['name'], '审核驳回：{}'.format(reason)))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/tasks/<int:task_id>/comment', methods=['POST'])
+def add_comment(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    data = request.json
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+        VALUES (%s, %s, %s, %s)""",
+        (task_id, user['name'], data.get('content',''), data.get('type','comment')))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
