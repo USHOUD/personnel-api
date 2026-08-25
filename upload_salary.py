@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""人事令PDF上传解析接口"""
+"""人事令PDF上传解析接口 - 支持多种格式"""
 
 from flask import Blueprint, request, jsonify
 import fitz
@@ -16,7 +16,6 @@ upload_bp = Blueprint('upload', __name__)
 @upload_bp.route('/api/upload-order', methods=['POST'])
 def upload_order():
     """上传人事令PDF，自动识别工资信息"""
-    # Check if file is in request
     if 'file' not in request.files:
         return jsonify({'error': '未上传文件'}), 400
     
@@ -36,7 +35,10 @@ def upload_order():
         results = []
         for page in doc:
             text = page.get_text()
+            # 尝试两种解析方式
             parsed = parse_salary_table(text)
+            if not parsed:
+                parsed = parse_salary_inline(text)
             results.extend(parsed)
         
         doc.close()
@@ -138,7 +140,7 @@ def update_salary():
 
 
 def parse_salary_table(text):
-    """解析工资表格"""
+    """解析工资表格格式"""
     lines = text.split('\n')
     data = []
     i = 0
@@ -177,3 +179,50 @@ def parse_salary_table(text):
         i += 1
     
     return data
+
+
+def parse_salary_inline(text):
+    """解析人事令内联格式"""
+    data = []
+    
+    # 提取姓名
+    name_match = re.search(r'关于(.{2,4})(调动|助勤|毕业分配|职务任免|转正定职)', text)
+    if not name_match:
+        return data
+    
+    name = name_match.group(1)
+    
+    # 提取工资信息
+    base_salary = extract_number(text, r'岗位工资(\d+\.?\d*)元')
+    edu_salary = extract_number(text, r'学历工资(\d+\.?\d*)元')
+    skill_salary = extract_number(text, r'技能工资(\d+\.?\d*)元')
+    seniority_salary = extract_number(text, r'工龄工资(\d+\.?\d*)元')
+    min_guarantee = extract_number(text, r'最低保障工资(\d+\.?\d*)元')
+    
+    # 如果找到了至少3项工资信息，则认为有效
+    if base_salary and edu_salary and skill_salary:
+        total_salary = base_salary + edu_salary + skill_salary + seniority_salary
+        
+        data.append({
+            'name': name,
+            'position': '',  # 职位需要从其他地方提取
+            'base_salary': base_salary,
+            'edu_salary': edu_salary,
+            'skill_salary': skill_salary,
+            'seniority_salary': seniority_salary,
+            'min_guarantee': min_guarantee,
+            'total_salary': total_salary
+        })
+    
+    return data
+
+
+def extract_number(text, pattern):
+    """提取数字"""
+    match = re.search(pattern, text)
+    if match:
+        try:
+            return int(float(match.group(1)))
+        except:
+            return None
+    return None
