@@ -216,6 +216,7 @@ def my_tasks():
 
     # 取我的评分对象
     evaluatees, my_role = get_my_evaluatees(cur, user_phone)
+    evaluator_name = get_evaluator_name(cur, user_phone)  # 先取名（cursor 还开着）
     if not evaluatees or not my_role:
         cur.close()
         conn.close()
@@ -223,7 +224,7 @@ def my_tasks():
             'cycle': cycle,
             'my_role': my_role,
             'evaluatees': [],
-            'evaluator_name': get_evaluator_name(cur, user_phone),
+            'evaluator_name': evaluator_name,
             'message': '当前角色没有需要打分的人员'
         })
 
@@ -254,7 +255,6 @@ def my_tasks():
             item['submitted_at'] = sc['submitted_at'].strftime('%Y-%m-%d %H:%M') if sc['submitted_at'] else ''
         result_list.append(item)
 
-    evaluator_name = get_evaluator_name(cur, user_phone)
     cur.close()
     conn.close()
 

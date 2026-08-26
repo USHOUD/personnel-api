@@ -1557,20 +1557,34 @@ def create_task():
     assignee = data.get('assignee', '')
     assignee_id = data.get('assignee_id', '')
 
-    # 指定人员时：根据 id 查 phone（同名人员用 id 区分）
+    # 指定人员时：根据 id 查 phone/dept/project（同名人员用 id 区分）
     assignee_phone = ''
+    final_dept = data.get('dept', '')
+    final_project = data.get('project', '')
+
     if assignee_id:
-        cur.execute("SELECT phone FROM personnel WHERE id=%s LIMIT 1", (assignee_id,))
+        cur.execute("SELECT phone, dept, project FROM personnel WHERE id=%s LIMIT 1", (assignee_id,))
         row = cur.fetchone()
         if row:
             assignee_phone = row.get('phone') or ''
+            # 指定人员时强制以 personnel 表为准（防止发布时填错）
+            final_dept = row.get('dept') or ''
+            final_project = row.get('project') or ''
+    elif assignee:
+        # 没传 id 但传了名字（兼容老调用）：尝试按名字查
+        cur.execute("SELECT phone, dept, project FROM personnel WHERE name=%s AND (leave_date IS NULL OR leave_date='') LIMIT 1", (assignee,))
+        row = cur.fetchone()
+        if row and (not final_dept or not final_project):
+            # 仅在用户没传 dept/project 时才覆盖
+            final_dept = final_dept or (row.get('dept') or '')
+            final_project = final_project or (row.get('project') or '')
 
     cur.execute("""INSERT INTO tasks (title, content, publisher, publisher_name,
         assignee, assignee_id, assignee_phone, dept, project, deadline)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (data.get('title',''), data.get('content',''), user['phone'], user['name'],
          assignee, assignee_id, assignee_phone,
-         data.get('dept',''), data.get('project',''), data.get('deadline','')))
+         final_dept, final_project, data.get('deadline','')))
     task_id = cur.fetchone()['id']
     conn.commit()
     cur.close()
