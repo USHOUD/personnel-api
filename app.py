@@ -1591,6 +1591,122 @@ def create_task():
     conn.close()
     return jsonify({'success': True, 'id': task_id})
 
+@app.route('/api/tasks/<int:task_id>', methods=['PUT'])
+def update_task(task_id):
+    """修改任务（仅超管），支持修改标题/内容/责任人/截止日期"""
+    user_phone = request.headers.get('X-User-Phone', '')
+    if user_phone != '18184005669':
+        return jsonify({'error': '无权限（仅超级管理员）'}), 403
+
+    data = request.json
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    # 校验任务存在
+    cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+    task = cur.fetchone()
+    if not task:
+        cur.close(); conn.close()
+        return jsonify({'error': '任务不存在'}), 404
+
+    # 组装更新字段
+    updates = []
+    params = []
+
+    if 'title' in data:
+        updates.append('title=%s')
+        params.append(data['title'].strip())
+
+    if 'content' in data:
+        updates.append('content=%s')
+        params.append(data.get('content', ''))
+
+    if 'deadline' in data:
+        updates.append('deadline=%s')
+        params.append(data['deadline'])
+
+    # 责任人变更（核心需求）
+    if 'assignee' in data or 'assignee_id' in data:
+        new_assignee = data.get('assignee', task['assignee'])
+        new_assignee_id = data.get('assignee_id', task.get('assignee_id', ''))
+
+        # 自动带 dept/project/phone（与 create_task 逻辑一致）
+        new_dept = task.get('dept', '')
+        new_project = task.get('project', '')
+        new_phone = task.get('assignee_phone', '')
+
+        if new_assignee_id:
+            cur.execute("SELECT phone, dept, project FROM personnel WHERE id=%s LIMIT 1", (new_assignee_id,))
+            row = cur.fetchone()
+            if row:
+                new_phone = row.get('phone') or ''
+                new_dept = row.get('dept') or ''
+                new_project = row.get('project') or ''
+        elif new_assignee and new_assignee != task['assignee']:
+            cur.execute("SELECT phone, dept, project FROM personnel WHERE name=%s AND (leave_date IS NULL OR leave_date='') LIMIT 1", (new_assignee,))
+            row = cur.fetchone()
+            if row:
+                new_phone = new_phone or (row.get('phone') or '')
+                new_dept = new_dept or (row.get('dept') or '')
+                new_project = new_project or (row.get('project') or '')
+
+        updates.append('assignee=%s'); params.append(new_assignee)
+        updates.append('assignee_id=%s'); params.append(new_assignee_id)
+        updates.append('assignee_phone=%s'); params.append(new_phone)
+        updates.append('dept=%s'); params.append(new_dept)
+        updates.append('project=%s'); params.append(new_project)
+
+    if not updates:
+        cur.close(); conn.close()
+        return jsonify({'error': '没有要更新的字段'}), 400
+
+    updates.append('updated_at=NOW()')
+    params.append(task_id)
+    sql = f"UPDATE tasks SET {', '.join(updates)} WHERE id=%s"
+
+    try:
+        cur.execute(sql, params)
+        # 添加评论记录责任人变更
+        if 'assignee' in data or 'assignee_id' in data:
+            cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+                VALUES (%s, %s, %s, 'comment')""",
+                (task_id, '系统', f"管理员将责任人修改为 {data.get('assignee', task['assignee'])}"))
+        conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close(); conn.close()
+
+@app.route('/api/tasks/<int:task_id>', methods=['DELETE'])
+def delete_task(task_id):
+    """删除任务（仅超管）— 级联删除 comments 和 reviews"""
+    user_phone = request.headers.get('X-User-Phone', '')
+    if user_phone != '18184005669':
+        return jsonify({'error': '无权限（仅超级管理员）'}), 403
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT id, title FROM tasks WHERE id=%s", (task_id,))
+    task = cur.fetchone()
+    if not task:
+        cur.close(); conn.close()
+        return jsonify({'error': '任务不存在'}), 404
+
+    try:
+        # 删除关联数据（先 reviews，再 comments）
+        cur.execute("DELETE FROM task_reviews WHERE task_id=%s", (task_id,))
+        cur.execute("DELETE FROM task_comments WHERE task_id=%s", (task_id,))
+        cur.execute("DELETE FROM tasks WHERE id=%s", (task_id,))
+        conn.commit()
+        return jsonify({'success': True, 'deleted_title': task['title']})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close(); conn.close()
+
 @app.route('/api/tasks/<int:task_id>', methods=['GET'])
 def get_task(task_id):
     conn = get_db()
