@@ -9,12 +9,16 @@ import hashlib
 from supabase_config import get_db, init_db
 from psycopg2.extras import RealDictCursor
 from upload_salary import upload_bp
+from evaluation import bp as evaluation_bp
 
 app = Flask(__name__)
 CORS(app, expose_headers=['X-User-Phone'])
 
 # 注册工资上传接口
 app.register_blueprint(upload_bp)
+
+# 注册考核打分接口
+app.register_blueprint(evaluation_bp)
 
 # 初始化数据库
 init_db()

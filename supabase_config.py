@@ -119,7 +119,50 @@ def init_db():
         created_at TIMESTAMP DEFAULT NOW()
     );
     """)
-    
+
+    # 考核周期表
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS evaluation_cycles (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        period VARCHAR(20) NOT NULL,
+        cycle_type VARCHAR(20) DEFAULT 'quarter',
+        status VARCHAR(20) DEFAULT 'active',
+        start_date VARCHAR(20),
+        end_date VARCHAR(20),
+        created_at TIMESTAMP DEFAULT NOW(),
+        created_by VARCHAR(20)
+    );
+    """)
+
+    # 打分记录表
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS evaluation_scores (
+        id SERIAL PRIMARY KEY,
+        cycle_id INTEGER REFERENCES evaluation_cycles(id) ON DELETE CASCADE,
+        evaluator_phone VARCHAR(20) NOT NULL,
+        evaluator_name VARCHAR(50) NOT NULL,
+        evaluator_role VARCHAR(20) NOT NULL,
+        evaluatee_id VARCHAR(10) NOT NULL,
+        evaluatee_name VARCHAR(50) NOT NULL,
+        evaluatee_dept VARCHAR(50) DEFAULT '',
+        evaluatee_project VARCHAR(50) DEFAULT '',
+        performance_score NUMERIC DEFAULT 0,
+        ability_score NUMERIC DEFAULT 0,
+        attitude_score NUMERIC DEFAULT 0,
+        execution_score NUMERIC DEFAULT 0,
+        discipline_score NUMERIC DEFAULT 0,
+        total_score NUMERIC DEFAULT 0,
+        comment TEXT DEFAULT '',
+        submitted_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(cycle_id, evaluator_phone, evaluatee_id)
+    );
+    """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_cycle ON evaluation_scores(cycle_id);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_evaluator ON evaluation_scores(evaluator_phone);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_evaluatee ON evaluation_scores(evaluatee_id);")
+
     conn.commit()
     cur.close()
     conn.close()
