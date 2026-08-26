@@ -38,6 +38,92 @@ def get_current_user():
     conn.close()
     return user
 
+# ============= 拼音搜索 =============
+
+def get_py_initials(name):
+    """获取姓名拼音首字母（无音标，纯小写）"""
+    if not name:
+        return ''
+    try:
+        from pypinyin import lazy_pinyin, Style
+        return ''.join([p[0] for p in lazy_pinyin(str(name), style=Style.FIRST_LETTER)]).lower()
+    except Exception:
+        return ''
+
+def get_py_full(name):
+    """获取姓名全拼（小写）"""
+    if not name:
+        return ''
+    try:
+        from pypinyin import lazy_pinyin
+        return ''.join(lazy_pinyin(str(name))).lower()
+    except Exception:
+        return ''
+
+def match_name_pinyin(name, search_key):
+    """检查姓名是否匹配拼音搜索
+
+    - '龙'（中文单字） → 匹配名字含'龙' **或姓首字母是l** 的人（不匹配名字其他字的首字母）
+    - '陈'（中文单字） → 同上
+    - 'lcq' → 拼音首字母前缀匹配
+    - 'long' → 全拼含 long 或 initials 前缀匹配
+    - '龙长' → 名字含'龙长' 或 initials 前 N 位
+    """
+    if not name or not search_key:
+        return False
+    name_lower = name.lower()
+    search_lower = search_key.lower()
+    # 1. 原名子串匹配
+    if search_key in name or search_lower in name_lower:
+        return True
+    py_init = get_py_initials(name)
+    py_full = get_py_full(name)
+    # 2. 中文单字：只匹配姓氏（首字母或全拼）
+    if len(search_key) == 1 and not search_key.isascii():
+        # 搜索字的拼音首字母
+        search_char_initial = get_first_char_pinyin(search_key)
+        # 搜索字的全拼
+        search_char_full = get_first_char_pinyin(search_key)  # 同 get_first_char_pinyin
+        surname_init = py_init[0] if py_init else ''
+        # 姓氏首字母 == 搜索字拼音首字母
+        if surname_init == search_char_initial:
+            return True
+        # 姓氏全拼 == 搜索字拼音（处理单字姓）
+        surname_full = get_first_char_pinyin(name[0]) if name else ''
+        if surname_full == search_char_full:
+            return True
+        # 多字姓特殊情况：姓氏全拼的前N字 == 搜索字拼音
+        if py_full and search_char_full and py_full.startswith(search_char_full):
+            # 但要确保不会因为"龙"而匹配所有姓以"long"开头的人（不合理）
+            # 所以只接受单字姓氏或双字姓氏的第一字匹配
+            if len(name) >= 2:
+                # 比如搜"龙"，匹配"龙"姓的人，或"欧阳"姓（ouyang起始）
+                return False
+        return False
+    # 3. 拼音字母：匹配首字母前缀或全拼子串
+    if search_key.isascii():
+        # 拼音首字母前缀匹配（不是子串包含）
+        if search_lower and py_init.startswith(search_lower):
+            return True
+        # 全拼子串匹配（支持中间字匹配，如"long"匹配"longzhangqiu"）
+        if search_lower in py_full:
+            return True
+    else:
+        # 中文（多字）：匹配名字含此串或 initials 前缀
+        if search_lower == py_init[:len(search_lower)]:
+            return True
+    return False
+
+def get_first_char_pinyin(char):
+    """获取单个汉字的第一个拼音（处理多音字）"""
+    if not char:
+        return ''
+    try:
+        from pypinyin import lazy_pinyin
+        return lazy_pinyin(char)[0].lower()
+    except Exception:
+        return ''
+
 def mask_person_data(p, is_self=False, is_admin=False):
     """根据权限过滤人员数据"""
     dept = p.get('dept', '') or ''
@@ -205,9 +291,13 @@ def get_personnel():
 
     if search:
         key = search.lower()
-        people = [p for p in people if key in (p['name'] or '').lower()
-                  or key in (p['position'] or '').lower()
-                  or key in (p['project'] or '').lower()]
+        people = [p for p in people if (
+            key in (p['name'] or '').lower()
+            or key in (p['position'] or '').lower()
+            or key in (p['project'] or '').lower()
+            or key in (p['dept'] or '').lower()
+            or match_name_pinyin(p['name'], search)  # 拼音/姓氏智能匹配
+        )]
     
     # 排序逻辑
     def sort_key(p):
