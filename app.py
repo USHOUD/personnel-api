@@ -43,41 +43,39 @@ def mask_person_data(p, is_self=False, is_admin=False):
     dept = p.get('dept', '') or ''
     if not dept:
         dept = get_dept(p)
-    
-    # 管理员或本人看完整信息
-    if is_admin or is_self:
-        return {
-            'id': p['id'],
-            'name': p['name'],
-            'gender': p.get('gender', '') or '',
-            'id_card': p.get('id_card', '') or '',
-            'birth': p.get('birth', '') or '',
-            'edu': p.get('edu', '') or '',
-            'hometown': p.get('hometown', '') or '',
-            'position': p.get('position', '') or '',
-            'dept': dept,
-            'project': p.get('project', '') or '未分配',
-            'phone': p.get('phone', '') or '',
-            'cert': p.get('cert', '') or '',
-            'category': p.get('category', ''),
-            'salary': float(p['salary']) if p.get('salary') else None,
-            'status': p.get('status', '') or '在岗',
-            'status_detail': p.get('status_detail', '') or '',
-            'hire_date': p.get('hire_date', '') or '',
-            'leave_date': p.get('leave_date', '') or ''
-        }
-    
-    # 普通用户看别人：只显示基本信息
-    return {
+
+    base_fields = {
         'id': p['id'],
         'name': p['name'],
-        'gender': p.get('gender', '') or '',
         'position': p.get('position', '') or '',
         'dept': dept,
         'project': p.get('project', '') or '未分配',
         'phone': p.get('phone', '') or '',
         'category': p.get('category', ''),
-        'status': p.get('status', '') or '在岗'
+        'status': p.get('status', '') or '在岗',
+        'is_external': bool(p.get('is_external', False))
+    }
+
+    # 管理员或本人看完整信息
+    if is_admin or is_self:
+        return {
+            **base_fields,
+            'gender': p.get('gender', '') or '',
+            'id_card': p.get('id_card', '') or '',
+            'birth': p.get('birth', '') or '',
+            'edu': p.get('edu', '') or '',
+            'hometown': p.get('hometown', '') or '',
+            'cert': p.get('cert', '') or '',
+            'salary': float(p['salary']) if p.get('salary') else None,
+            'status_detail': p.get('status_detail', '') or '',
+            'hire_date': p.get('hire_date', '') or '',
+            'leave_date': p.get('leave_date', '') or ''
+        }
+
+    # 普通用户看别人：基础字段
+    return {
+        **base_fields,
+        'gender': p.get('gender', '') or ''
     }
 
 # ============= 人员相关API =============
@@ -160,32 +158,50 @@ def auto_restore_on_duty():
 
 @app.route('/api/personnel')
 def get_personnel():
-    """获取人员列表"""
+    """获取人员列表
+
+    参数：
+    - category: all/formal/outsourced/C1/C2
+    - search: 搜索关键字
+    - include_external: 1=包含外协系统人员（王丽娜/王婉怡/李鑫等，is_external=true）
+                     默认 0=不包含（花名册页面）
+    """
     # 自动恢复过期的出差/休假人员
     auto_restore_on_duty()
 
     conn = get_db()
     cur = conn.cursor()
-    
+
     category = request.args.get('category', 'all')
     search = request.args.get('search', '').strip()
-    
+    include_external = request.args.get('include_external', '0') == '1'
+
+    # 默认过滤掉外协系统人员（花名册页面不显示）
+    where_clauses = []
+    params = []
+
     if category == 'formal':
-        cur.execute("SELECT * FROM personnel WHERE category='正式职工'")
+        where_clauses.append("category='正式职工'")
     elif category == 'outsourced':
-        cur.execute("SELECT * FROM personnel WHERE category IN ('C1','C2')")
+        where_clauses.append("category IN ('C1','C2')")
     elif category == 'C1':
-        cur.execute("SELECT * FROM personnel WHERE category='C1'")
+        where_clauses.append("category='C1'")
     elif category == 'C2':
-        cur.execute("SELECT * FROM personnel WHERE category='C2'")
-    else:
-        cur.execute("SELECT * FROM personnel")
-    
+        where_clauses.append("category='C2'")
+
+    if not include_external:
+        where_clauses.append("(is_external IS NULL OR is_external = FALSE)")
+
+    sql = "SELECT * FROM personnel"
+    if where_clauses:
+        sql += " WHERE " + " AND ".join(where_clauses)
+    cur.execute(sql)
+
     people = cur.fetchall()
-    
+
     if search:
         key = search.lower()
-        people = [p for p in people if key in (p['name'] or '').lower() 
+        people = [p for p in people if key in (p['name'] or '').lower()
                   or key in (p['position'] or '').lower()
                   or key in (p['project'] or '').lower()]
     

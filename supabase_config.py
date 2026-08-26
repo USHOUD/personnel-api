@@ -163,6 +163,9 @@ def init_db():
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee_id VARCHAR(10) DEFAULT '';")
     cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee_phone VARCHAR(20) DEFAULT '';")
 
+    # 人员表新增字段：is_external（外协系统人员，不属于安装公司人事关系）
+    cur.execute("ALTER TABLE personnel ADD COLUMN IF NOT EXISTS is_external BOOLEAN DEFAULT FALSE;")
+
     cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_cycle ON evaluation_scores(cycle_id);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_evaluator ON evaluation_scores(evaluator_phone);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_evaluatee ON evaluation_scores(evaluatee_id);")
