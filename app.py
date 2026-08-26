@@ -1797,6 +1797,10 @@ def approve_progress(task_id):
     user = get_current_user()
     if not user:
         return jsonify({'error': '未登录'}), 401
+    # 审核权限：只有超管 + 四个领导班子能审核
+    allowed_reviewers = ['18184005669', '18523176628', '13980885726', '17636671760', '18382194536']
+    if user.get('phone') not in allowed_reviewers:
+        return jsonify({'error': '无审核权限（只有领导班子和管理员可审核）'}), 403
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT * FROM task_reviews WHERE task_id=%s AND status='pending' ORDER BY created_at DESC LIMIT 1", (task_id,))
@@ -1820,6 +1824,9 @@ def reject_progress(task_id):
     user = get_current_user()
     if not user:
         return jsonify({'error': '未登录'}), 401
+    allowed_reviewers = ['18184005669', '18523176628', '13980885726', '17636671760', '18382194536']
+    if user.get('phone') not in allowed_reviewers:
+        return jsonify({'error': '无审核权限（只有领导班子和管理员可审核）'}), 403
     data = request.json
     reason = data.get('reason', '成果不符合要求')
     conn = get_db()
