@@ -18,6 +18,10 @@ def get_evaluator_role(person):
     position = (person.get('position') or '').lower()
     dept = person.get('dept') or ''
 
+    # 不参与考核的岗位（司机/实习生/见习生等）：返回 None
+    if any(k in position for k in ['司机', '实习', '见习']):
+        return None
+
     # 领导班子：经理、书记、商务经理
     if any(k in position for k in ['经理', '书记']):
         return 'leader'
@@ -62,33 +66,40 @@ def get_my_evaluatees(cur, evaluator_phone):
     my_dept = me.get('dept') or ''
     my_position = me.get('position') or ''
 
-    # 过滤掉领导班子和部门负责人（即只保留一般员工作为被考核人）
-    def is_leader_or_dept_leader(p):
+    # 过滤掉领导班子、部门负责人、不参与考核的岗位（司机/实习等）
+    # 不参与考核的岗位：只评别人，不被别人评，也不需要给别人评
+    def is_excluded_from_eval(p):
         pos = (p.get('position') or '').lower()
-        return any(k in pos for k in ['经理', '书记', '部长', '主任', '负责人', '主管', '副主管'])
+        # 领导班子/部门负责人（不打分也不被评）
+        if any(k in pos for k in ['经理', '书记', '部长', '主任', '负责人', '主管', '副主管']):
+            return True
+        # 不参与考核的岗位（司机、实习生、见习生等）
+        if any(k in pos for k in ['司机', '实习', '见习']):
+            return True
+        return False
 
     evaluatees = []
 
     if my_role == 'leader':
-        # 领导班子：所有一般员工
+        # 领导班子：所有一般员工（排除领导班子/部门负责人/司机等）
         evaluatees = [p for p in all_personnel
-                      if p['id'] != my_id and not is_leader_or_dept_leader(p)]
+                      if p['id'] != my_id and not is_excluded_from_eval(p)]
 
     elif my_role == 'dept_leader':
         # 部门负责人：本部门一般员工
         evaluatees = [p for p in all_personnel
                       if p['id'] != my_id
                       and p.get('dept') == my_dept
-                      and not is_leader_or_dept_leader(p)]
+                      and not is_excluded_from_eval(p)]
         # 如果本部门没人，回退到所有一般员工
         if not evaluatees:
             evaluatees = [p for p in all_personnel
-                          if p['id'] != my_id and not is_leader_or_dept_leader(p)]
+                          if p['id'] != my_id and not is_excluded_from_eval(p)]
 
     else:
         # 普通员工：其他所有普通员工（互评）
         evaluatees = [p for p in all_personnel
-                      if p['id'] != my_id and not is_leader_or_dept_leader(p)]
+                      if p['id'] != my_id and not is_excluded_from_eval(p)]
 
     return evaluatees, my_role
 
