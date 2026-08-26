@@ -1553,10 +1553,24 @@ def create_task():
     data = request.json
     conn = get_db()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""INSERT INTO tasks (title, content, publisher, publisher_name, assignee, dept, project, deadline)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+
+    assignee = data.get('assignee', '')
+    assignee_id = data.get('assignee_id', '')
+
+    # 指定人员时：根据 id 查 phone（同名人员用 id 区分）
+    assignee_phone = ''
+    if assignee_id:
+        cur.execute("SELECT phone FROM personnel WHERE id=%s LIMIT 1", (assignee_id,))
+        row = cur.fetchone()
+        if row:
+            assignee_phone = row.get('phone') or ''
+
+    cur.execute("""INSERT INTO tasks (title, content, publisher, publisher_name,
+        assignee, assignee_id, assignee_phone, dept, project, deadline)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (data.get('title',''), data.get('content',''), user['phone'], user['name'],
-         data.get('assignee',''), data.get('dept',''), data.get('project',''), data.get('deadline','')))
+         assignee, assignee_id, assignee_phone,
+         data.get('dept',''), data.get('project',''), data.get('deadline','')))
     task_id = cur.fetchone()['id']
     conn.commit()
     cur.close()

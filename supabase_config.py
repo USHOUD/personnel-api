@@ -159,6 +159,10 @@ def init_db():
     );
     """)
 
+    # 任务表新增字段：assignee_id（人员id，同名区分）、assignee_phone（推送用）
+    cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee_id VARCHAR(10) DEFAULT '';")
+    cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee_phone VARCHAR(20) DEFAULT '';")
+
     cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_cycle ON evaluation_scores(cycle_id);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_evaluator ON evaluation_scores(evaluator_phone);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_evaluatee ON evaluation_scores(evaluatee_id);")
