@@ -176,7 +176,7 @@ def get_personnel():
     search = request.args.get('search', '').strip()
     include_external = request.args.get('include_external', '0') == '1'
 
-    # 默认过滤掉外协系统人员（花名册页面不显示）
+    # 默认过滤掉外协系统人员（花名册页面不显示）和已离职人员
     where_clauses = []
     params = []
 
@@ -191,6 +191,10 @@ def get_personnel():
 
     if not include_external:
         where_clauses.append("(is_external IS NULL OR is_external = FALSE)")
+
+    # 默认过滤掉已离职人员
+    if not request.args.get('include_left', '0') == '1':
+        where_clauses.append("(leave_date IS NULL OR leave_date = '')")
 
     sql = "SELECT * FROM personnel"
     if where_clauses:
@@ -942,26 +946,29 @@ def reject_trip(record_id):
 
 @app.route('/api/statistics')
 def get_statistics():
-    """获取统计数据"""
+    """获取统计数据（仅统计安装公司人员，不含外协系统人员）"""
     conn = get_db()
     cur = conn.cursor()
-    
-    cur.execute("SELECT COUNT(*) as total FROM personnel")
+
+    # 基础过滤：不含外协系统人员（与花名册保持一致）
+    base_where = "(leave_date IS NULL OR leave_date = '') AND (is_external IS NULL OR is_external = FALSE)"
+
+    cur.execute(f"SELECT COUNT(*) as total FROM personnel WHERE {base_where}")
     total = cur.fetchone()['total']
-    
-    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE category='正式职工'")
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND category='正式职工'")
     formal = cur.fetchone()['c']
-    
-    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE category='C1'")
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND category='C1'")
     c1 = cur.fetchone()['c']
-    
-    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE category='C2'")
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND category='C2'")
     c2 = cur.fetchone()['c']
-    
-    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE gender='男'")
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND gender='男'")
     male = cur.fetchone()['c']
-    
-    cur.execute("SELECT COUNT(*) as c FROM personnel WHERE gender='女'")
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND gender='女'")
     female = cur.fetchone()['c']
     
     # 学历统计
@@ -973,18 +980,18 @@ def get_statistics():
         if any(k in edu for k in ['中专','初中','高中']): return '高中及以下'
         return '未知'
     
-    cur.execute("SELECT edu FROM personnel")
+    cur.execute(f"SELECT edu FROM personnel WHERE {base_where}")
     edu_stats = {}
     for row in cur.fetchall():
         cat = map_edu(row['edu'])
         edu_stats[cat] = edu_stats.get(cat, 0) + 1
-    
+
     # 项目统计
-    cur.execute("SELECT project, COUNT(*) as c FROM personnel WHERE category='正式职工' GROUP BY project")
+    cur.execute(f"SELECT project, COUNT(*) as c FROM personnel WHERE {base_where} AND category='正式职工' GROUP BY project")
     dept_stats = {row['project']: row['c'] for row in cur.fetchall()}
-    
+
     # 证书统计
-    cur.execute("SELECT name, cert FROM personnel")
+    cur.execute(f"SELECT name, cert FROM personnel WHERE {base_where}")
     cert_stats = {
         '一建': {'count': 0, 'persons': []},
         '一造': {'count': 0, 'persons': []},
