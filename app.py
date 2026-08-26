@@ -86,15 +86,22 @@ def get_dept(person):
     """根据职位和项目自动推断部门"""
     position = (person.get('position', '') or '').lower()
     project = person.get('project', '') or ''
-    
+    stored_dept = (person.get('dept', '') or '').strip()
+
+    # 优先用数据库里已存的部门（手动维护的优先于自动推断）
+    if stored_dept and stored_dept not in ('质量技术部',) or stored_dept in ('BIM组', '设计组'):
+        return stored_dept
+
     # 领导班子
     if any(k in position for k in ['经理', '书记']):
         return '领导班子'
-    
+
     # 后台人员
     if project == '后台':
-        if any(k in position for k in ['bim', '设计']):
-            return '质量技术部'
+        if any(k in position for k in ['bim']):
+            return 'BIM组'
+        elif any(k in position for k in ['设计']):
+            return '设计组'
         elif any(k in position for k in ['策划', '调度']):
             return '生产管理中心'
         elif any(k in position for k in ['商务', '预算', '造价', '结算', '成本', '核算']):
@@ -105,9 +112,13 @@ def get_dept(person):
             return '安全环保部'
         else:
             return '综合办公室'
-    
-    # 项目人员
-    if any(k in position for k in ['商务', '预算', '造价', '结算', '成本', '核算']):
+
+    # 项目人员：按专业归口
+    if any(k in position for k in ['bim']):
+        return 'BIM组'
+    elif any(k in position for k in ['设计']):
+        return '设计组'
+    elif any(k in position for k in ['商务', '预算', '造价', '结算', '成本', '核算']):
         return '商务法务部'
     elif any(k in position for k in ['安全']):
         return '安全环保部'
