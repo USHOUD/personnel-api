@@ -258,13 +258,19 @@ def my_tasks():
     cur.close()
     conn.close()
 
+    # 预计算百分比（WXML 不支持方法调用）
+    total = len(result_list)
+    scored = sum(1 for x in result_list if x['scored'])
+    percent = round(scored / total * 100) if total > 0 else 0
+
     return jsonify({
         'cycle': cycle,
         'my_role': my_role,
         'evaluator_name': evaluator_name,
         'evaluatees': result_list,
-        'total_count': len(result_list),
-        'scored_count': sum(1 for x in result_list if x['scored'])
+        'total_count': total,
+        'scored_count': scored,
+        'percent': percent
     })
 
 
