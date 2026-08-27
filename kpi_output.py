@@ -249,16 +249,49 @@ def calculate_output_score(cur, dept: str, period: str) -> Decimal:
     return Decimal('0')
 
 
-def calculate_eval_score(cur, person_id: Union[int, str]) -> Decimal:
-    """计算360评价平均分（0-100）"""
+def calculate_eval_score(cur, person_id: Union[int, str], cycle_id: Optional[int] = None) -> Tuple[Decimal, int]:
+    """计算360评价平均分（指定周期内的）
+
+    Args:
+        cur: 数据库游标
+        person_id: 被评价人ID
+        cycle_id: 考核周期ID，None则取最近已关闭周期
+
+    Returns:
+        (平均分Decimal, 评价人数)
+    """
+    if cycle_id is None:
+        cycle_id = get_latest_closed_cycle_id(cur)
+
+    if cycle_id is None:
+        return Decimal('0'), 0
+
     cur.execute("""
-        SELECT AVG(total_score) AS avg_score
+        SELECT AVG(total_score) AS avg_score, COUNT(*) AS cnt
         FROM evaluation_scores
-        WHERE evaluatee_id=%s
-    """, (person_id,))
+        WHERE evaluatee_id=%s AND cycle_id=%s
+    """, (person_id, cycle_id))
     row = cur.fetchone()
     avg = row['avg_score'] or 0
-    return Decimal(str(avg)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    cnt = row['cnt'] or 0
+    return Decimal(str(avg)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), cnt
+
+
+def get_latest_closed_cycle_id(cur) -> Optional[int]:
+    """获取最近已关闭的考核周期ID"""
+    cur.execute("""
+        SELECT id FROM evaluation_cycles
+        WHERE status='closed'
+        ORDER BY id DESC LIMIT 1
+    """)
+    row = cur.fetchone()
+    return row['id'] if row else None
+
+
+def get_cycle_info(cur, cycle_id: int) -> Optional[Dict[str, Any]]:
+    """获取考核周期信息"""
+    cur.execute("SELECT id, name, period, status FROM evaluation_cycles WHERE id=%s", (cycle_id,))
+    return cur.fetchone()
 
 
 def calculate_final_score(
@@ -869,14 +902,20 @@ def review_acceptance_doc(user: Dict[str, Any], did: int) -> Tuple[Any, int]:
 
 @bp.route('/api/assessment/my-score', methods=['GET'])
 @login_required
-def my_assessment_score(user: Dict[str, Any]) -> Tuple[Any, int]:
+def my_assessment_score(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """我的综合考核分（KPI + 产值 + 360评价）
 
-    根据员工类型自动选择：
-    - 后台员工：任务KPI 60% + 360评价 40%
-    - 项目部员工：产值 60% + 360评价 40%
+    360评价按考核周期取分：
+    - 指定 cycle_id：用该周期的评价分
+    - 未指定：自动取最近已关闭的考核周期
+
+    考核周期关闭后，分数自动可用（无需手动同步）。
+
+    后台员工：任务KPI 60% + 360评价 40%
+    项目部员工：产值 60% + 360评价 40%
     """
     period = request.args.get('period', get_period_from_date())
+    cycle_id = request.args.get('cycle_id', type=int)
 
     try:
         with get_db_cursor() as cur:
@@ -892,14 +931,18 @@ def my_assessment_score(user: Dict[str, Any]) -> Tuple[Any, int]:
             is_proj = is_project_department(project_dept)
             output_score = calculate_output_score(cur, project_dept, period) if is_proj else Decimal('0')
 
-            # 3. 360评价分
-            eval_score = calculate_eval_score(cur, me['id'])
+            # 3. 360评价分（按考核周期取）
+            eval_score, eval_count = calculate_eval_score(cur, me['id'], cycle_id)
+            actual_cycle_id = cycle_id or get_latest_closed_cycle_id(cur)
+            cycle_info = get_cycle_info(cur, actual_cycle_id) if actual_cycle_id else None
 
             # 综合分
             final_score = calculate_final_score(kpi_score, output_score, eval_score, is_proj)
 
             return jsonify({
                 'period': period,
+                'cycle_id': actual_cycle_id,
+                'cycle_name': cycle_info['name'] if cycle_info else '',
                 'person': {
                     'id': me['id'],
                     'name': me['name'],
@@ -910,8 +953,10 @@ def my_assessment_score(user: Dict[str, Any]) -> Tuple[Any, int]:
                 'kpi_score': float(kpi_score),
                 'output_score': float(output_score),
                 'eval_score': float(eval_score),
+                'eval_count': eval_count,
                 'final_score': float(final_score),
-                'is_project_dept': is_proj
+                'is_project_dept': is_proj,
+                'has_cycle': bool(cycle_info)
             }), 200
     except Exception as e:
         logger.error(f"获取个人综合考核分失败: {e}", exc_info=True)
@@ -920,15 +965,17 @@ def my_assessment_score(user: Dict[str, Any]) -> Tuple[Any, int]:
 
 @bp.route('/api/assessment/team-score', methods=['GET'])
 @admin_required
-def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Any, int]:
+def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """团队综合考核分（管理员）
 
     计算所有在职非辅助人员的综合考核分，按得分降序。
+    360评价按指定周期取分（未指定则用最近已关闭周期）。
 
     后台员工：任务KPI 60% + 360评价 40%
     项目部员工：产值 60% + 360评价 40%
     """
     period = request.args.get('period', get_period_from_date())
+    cycle_id = request.args.get('cycle_id', type=int)
 
     try:
         with get_db_cursor() as cur:
@@ -943,20 +990,20 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Any, int]:
             """, POSITION_EXCLUDE_PATTERNS)
             personnel = cur.fetchall()
 
+            # 自动确定考核周期
+            actual_cycle_id = cycle_id or get_latest_closed_cycle_id(cur)
+            cycle_info = get_cycle_info(cur, actual_cycle_id) if actual_cycle_id else None
+
             result = []
             for p in personnel:
-                # 1. KPI分
                 kpi_score = calculate_kpi_score(cur, p['name'], period)
 
-                # 2. 产值分
                 project_dept = p.get('project') or ''
                 is_proj = is_project_department(project_dept)
                 output_score = calculate_output_score(cur, project_dept, period) if is_proj else Decimal('0')
 
-                # 3. 360评价分
-                eval_score = calculate_eval_score(cur, p['id'])
+                eval_score, eval_count = calculate_eval_score(cur, p['id'], actual_cycle_id)
 
-                # 综合分
                 final_score = calculate_final_score(kpi_score, output_score, eval_score, is_proj)
 
                 result.append({
@@ -969,11 +1016,38 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Any, int]:
                     'kpi_score': float(kpi_score),
                     'output_score': float(output_score),
                     'eval_score': float(eval_score),
+                    'eval_count': eval_count,
                     'final_score': float(final_score)
                 })
 
             result.sort(key=lambda x: x['final_score'], reverse=True)
-            return jsonify({'period': period, 'scores': result}), 200
+            return jsonify({
+                'period': period,
+                'cycle_id': actual_cycle_id,
+                'cycle_name': cycle_info['name'] if cycle_info else '',
+                'scores': result
+            }), 200
     except Exception as e:
         logger.error(f"获取团队综合考核分失败: {e}", exc_info=True)
+        return jsonify({'error': '获取数据失败，请稍后重试'}), 500
+
+
+@bp.route('/api/assessment/cycles', methods=['GET'])
+@login_required
+def list_assessment_cycles(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+    """获取考核周期列表（综合考核用）
+
+    返回已关闭的周期列表（按ID倒序）和当前活跃周期。
+    """
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT id, name, period, status, start_date, end_date
+                FROM evaluation_cycles
+                ORDER BY id DESC
+            """)
+            cycles = cur.fetchall()
+            return jsonify({'cycles': cycles or []}), 200
+    except Exception as e:
+        logger.error(f"获取考核周期列表失败: {e}", exc_info=True)
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
