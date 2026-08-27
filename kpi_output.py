@@ -643,8 +643,10 @@ def my_assessment_score():
     eval_score = round(float(eval_row['avg_score'] or 0), 2)
 
     # 综合分
+    # 后台员工：任务KPI 60% + 360评价 40%
+    # 项目部员工：产值 60% + 360评价 40%（产值本身就是项目部KPI）
     if is_project_dept:
-        final_score = round(kpi_score * 0.3 + output_score * 0.3 + eval_score * 0.4, 2)
+        final_score = round(output_score * 0.6 + eval_score * 0.4, 2)
     else:
         final_score = round(kpi_score * 0.6 + eval_score * 0.4, 2)
 
@@ -735,8 +737,10 @@ def team_assessment_scores():
         evl = round(float(eval_row['avg_score'] or 0), 2)
 
         # 综合分
+        # 后台员工：任务KPI 60% + 360评价 40%
+        # 项目部员工：产值 60% + 360评价 40%（产值本身就是项目部KPI）
         if is_proj_dept:
-            final = round(kpi * 0.3 + output * 0.3 + evl * 0.4, 2)
+            final = round(output * 0.6 + evl * 0.4, 2)
         else:
             final = round(kpi * 0.6 + evl * 0.4, 2)
 
