@@ -94,6 +94,35 @@ def get_period_from_date(date_str: str = '') -> str:
         return datetime.now().strftime('%Y-%m')
 
 
+# ============= 健康检查（防云托管冷启动） =============
+
+@bp.route('/api/health', methods=['GET'])
+def health_check() -> Tuple[Dict[str, Any], int]:
+    """轻量级健康检查端点
+
+    用途：
+    - 给监控/cron 每 5 分钟调用一次，避免云托管实例冷启动
+    - 检查数据库连接是否正常
+
+    Returns:
+        {status: 'ok', db: 'ok'/'error', timestamp: ISO格式}
+    """
+    db_status = 'ok'
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT 1")
+    except Exception as e:
+        logger.error(f"健康检查DB失败: {e}")
+        db_status = 'error'
+
+    status_code = 200 if db_status == 'ok' else 503
+    return jsonify({
+        'status': 'ok' if db_status == 'ok' else 'degraded',
+        'db': db_status,
+        'timestamp': datetime.now().isoformat()
+    }), status_code
+
+
 def format_datetime(dt: Any) -> str:
     """格式化日期时间为字符串"""
     return str(dt) if dt else ''
