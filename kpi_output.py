@@ -1007,8 +1007,10 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
             position NOT LIKE '%%副%%'
         ) AND (is_external=false OR is_external IS NULL)"""
     elif level == 'outsource':
-        level_condition = "AND category IN ('C1', 'C2')"
+        # 外包人员 = C1 + C2（排除 is_external=true 的外派）
+        level_condition = "AND category IN ('C1', 'C2') AND (is_external=false OR is_external IS NULL)"
     elif level == 'external':
+        # 外协/外派人员 = is_external=true（含 dept=其他 的外派人员）
         level_condition = "AND is_external=true"
     else:
         level_condition = ""
