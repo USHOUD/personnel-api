@@ -702,9 +702,24 @@ def upsert_output_plan(user: Dict[str, Any]) -> Tuple[Any, int]:
 
 @bp.route('/api/output/dashboard', methods=['GET'])
 @login_required
-def output_dashboard(user: Dict[str, Any]) -> Tuple[Any, int]:
-    """产值看板：所有项目部本月完成情况"""
+def output_dashboard(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+    """产值看板：所有项目部本月完成情况
+
+    分级结构：
+    - 项目部（一线项目）：康定、成都北站、遂宁站等
+    - 安装公司机关：
+      - 派出机构：供应链中心、预算中心、其他
+      - 机关本部：综合办、商务法务部、财务部等
+
+    Query Params:
+        year_month (str): 月份YYYY-MM，默认当前月
+    """
     year_month = request.args.get('year_month', get_period_from_date())
+
+    # 项目部 dept 关键词（一线项目部）
+    PROJECT_DEPT_KEYWORDS = ['项目', '站', '片区', '标段']
+    # 派出机构 dept（外派的部门/团队）
+    DISPATCH_DEPTS = {'供应链分中心', '预算中心', '其他'}
 
     try:
         with get_db_cursor() as cur:
@@ -733,10 +748,26 @@ def output_dashboard(user: Dict[str, Any]) -> Tuple[Any, int]:
                     Decimal('0.01'), rounding=ROUND_HALF_UP
                 ) if planned > 0 else Decimal('0')
 
+                dept = p.get('dept') or '未分配'
+
+                # 判断项目所属机构类别
+                is_project_dept = any(kw in dept for kw in PROJECT_DEPT_KEYWORDS)
+                if is_project_dept:
+                    org_category = 'project_dept'
+                    org_name = dept
+                elif dept in DISPATCH_DEPTS:
+                    org_category = 'dispatch'
+                    org_name = dept
+                else:
+                    org_category = 'headquarters_office'
+                    org_name = dept
+
                 result.append({
                     'id': p['id'],
                     'name': p['name'],
-                    'dept': p.get('dept') or '',
+                    'dept': dept,
+                    'org_category': org_category,
+                    'org_name': org_name,
                     'total_contract_value': float(Decimal(str(p.get('total_contract_value') or 0))),
                     'manager_name': p.get('manager_name') or '',
                     'planned_output': float(planned),
@@ -745,40 +776,96 @@ def output_dashboard(user: Dict[str, Any]) -> Tuple[Any, int]:
                     'pending_docs': p.get('pending_docs') or 0
                 })
 
-            by_dept: Dict[str, Dict[str, Any]] = {}
-            for r in result:
-                d = r['dept'] or '未分配'
-                if d not in by_dept:
-                    by_dept[d] = {
-                        'dept': d,
-                        'project_count': 0,
-                        'planned': Decimal('0'),
-                        'actual': Decimal('0'),
-                        'projects': []
-                    }
-                by_dept[d]['project_count'] += 1
-                by_dept[d]['planned'] += Decimal(str(r['planned_output']))
-                by_dept[d]['actual'] += Decimal(str(r['actual_output']))
-                by_dept[d]['projects'].append(r)
+            # 按机构层级分组（一线项目部 / 安装公司机关）
+            org_structure = {
+                'project_dept': {'name': '项目部', 'subgroups': []},
+                'dispatch': {'name': '派出机构', 'subgroups': []},
+                'headquarters_office': {'name': '机关本部', 'subgroups': []}
+            }
 
-            dept_list = []
-            for d in by_dept.values():
-                dept_progress = (d['actual'] / d['planned'] * Decimal('100')).quantize(
+            # 先按 org_name 分组
+            by_org_name = {}
+            for r in result:
+                cat = r['org_category']
+                name = r['org_name']
+                if name not in by_org_name:
+                    by_org_name[name] = {'name': name, 'category': cat, 'projects': []}
+                by_org_name[name]['projects'].append(r)
+
+            # 计算每个 org_name 的汇总
+            org_groups = {}
+            for name, data in by_org_name.items():
+                planned = sum(Decimal(str(p['planned_output'])) for p in data['projects'])
+                actual = sum(Decimal(str(p['actual_output'])) for p in data['projects'])
+                progress = (actual / planned * Decimal('100')).quantize(
                     Decimal('0.01'), rounding=ROUND_HALF_UP
-                ) if d['planned'] > 0 else Decimal('0')
-                dept_list.append({
-                    'dept': d['dept'],
-                    'project_count': d['project_count'],
-                    'planned': float(d['planned']),
-                    'actual': float(d['actual']),
-                    'progress': float(dept_progress),
-                    'projects': d['projects']
-                })
+                ) if planned > 0 else Decimal('0')
+                org_groups[name] = {
+                    'name': name,
+                    'category': data['category'],
+                    'project_count': len(data['projects']),
+                    'planned': float(planned),
+                    'actual': float(actual),
+                    'progress': float(progress),
+                    'projects': data['projects']
+                }
+
+            # 填充到 org_structure
+            for name, data in org_groups.items():
+                cat = data['category']
+                org_structure[cat]['subgroups'].append(data)
+
+            # 一线项目部和机关的二级结构
+            by_org = [
+                {
+                    'category': 'project_dept',
+                    'name': '项目部（一线）',
+                    'total_planned': sum(s['planned'] for s in org_structure['project_dept']['subgroups']),
+                    'total_actual': sum(s['actual'] for s in org_structure['project_dept']['subgroups']),
+                    'project_count': sum(s['project_count'] for s in org_structure['project_dept']['subgroups']),
+                    'subgroups': org_structure['project_dept']['subgroups']
+                },
+                {
+                    'category': 'headquarters',
+                    'name': '安装公司机关',
+                    'total_planned': sum(s['planned'] for s in org_structure['dispatch']['subgroups'] + org_structure['headquarters_office']['subgroups']),
+                    'total_actual': sum(s['actual'] for s in org_structure['dispatch']['subgroups'] + org_structure['headquarters_office']['subgroups']),
+                    'project_count': sum(s['project_count'] for s in org_structure['dispatch']['subgroups'] + org_structure['headquarters_office']['subgroups']),
+                    'subgroups': [
+                        {
+                            'sub_name': '派出机构',
+                            'sub_category': 'dispatch',
+                            'subgroups': org_structure['dispatch']['subgroups']
+                        },
+                        {
+                            'sub_name': '机关本部',
+                            'sub_category': 'headquarters_office',
+                            'subgroups': org_structure['headquarters_office']['subgroups']
+                        }
+                    ]
+                }
+            ]
+
+            # 计算安装公司机关的总进度
+            for org in by_org:
+                if org['category'] == 'headquarters':
+                    if org['total_planned'] > 0:
+                        org['progress'] = float((Decimal(str(org['total_actual'])) / Decimal(str(org['total_planned'])) * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+                    else:
+                        org['progress'] = 0
+
+            for org in by_org:
+                if org['category'] == 'project_dept':
+                    if org['total_planned'] > 0:
+                        org['progress'] = float((Decimal(str(org['total_actual'])) / Decimal(str(org['total_planned'])) * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+                    else:
+                        org['progress'] = 0
 
             return jsonify({
                 'year_month': year_month,
                 'projects': result,
-                'by_dept': dept_list
+                'by_dept': list(org_groups.values()),  # 兼容老字段
+                'by_org': by_org
             }), 200
     except Exception as e:
         logger.error(f"获取产值看板失败: {e}", exc_info=True)
