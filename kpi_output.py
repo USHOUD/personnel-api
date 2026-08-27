@@ -1,9 +1,9 @@
 """KPI考核 + 产值看板 + 综合考核 API
-Kim优化版（修复了multiply_by_100参数bug）
+Kimi优化版 v2（修复装饰器重复查询、SQL性能、Decimal重复、日志重复等问题）
 """
 import logging
 from datetime import datetime
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from functools import wraps
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -17,12 +17,12 @@ logger = logging.getLogger(__name__)
 
 # 权限相关
 SUPER_ADMIN_PHONE: str = '18184005669'
-PRODUCTION_ADMIN_PHONE: str = '15196251135'  # 周进 F14
+PRODUCTION_ADMIN_PHONE: str = '15196251135'
 LEADER_PHONES: Dict[str, str] = {
-    '18523176628': '邱方恒',  # F4 经理
-    '13980885726': '廖志成',  # F2 书记
-    '17636671760': '吕亮',    # F1 副经理
-    '18382194536': '李强',    # F3 商务经理
+    '18523176628': '邱方恒',
+    '13980885726': '廖志成',
+    '17636671760': '吕亮',
+    '18382194536': '李强',
 }
 
 # 权重与比例
@@ -42,11 +42,125 @@ STATUS_PENDING: str = 'pending'
 STATUS_ACTIVE: str = 'active'
 STATUS_REJECTED: str = 'rejected'
 
+# 产值看板机构分类
+PROJECT_DEPT_KEYWORDS = ['项目', '站', '片区', '标段']
+DISPATCH_DEPTS = {'供应链分中心', '预算中心', '其他'}
 
-# ============= 数据库上下文管理器 =============
+
+# ============= 基础工具函数（新增） =============
+
+def to_decimal(value: Any, default: Decimal = Decimal('0')) -> Decimal:
+    """安全地将任意值转为 Decimal"""
+    if value is None:
+        return default
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
+
+
+def safe_divide(numerator: Any, denominator: Any, multiplier: Decimal = Decimal('1')) -> Decimal:
+    """安全除法，避免 ZeroDivisionError"""
+    num = to_decimal(numerator)
+    den = to_decimal(denominator)
+    if den <= 0:
+        return Decimal('0')
+    return (num / den * multiplier).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+
+def get_month_range(year_month: str) -> Tuple[str, str]:
+    """将 YYYY-MM 转为日期范围字符串（用于SQL范围查询）
+
+    替代低效的 TO_CHAR(column, 'YYYY-MM') = %s，利用索引加速
+    """
+    year, month = map(int, year_month.split('-'))
+    start = f"{year_month}-01"
+    if month == 12:
+        end = f"{year + 1}-01-01"
+    else:
+        end = f"{year}-{str(month + 1).zfill(2)}-01"
+    return start, end
+
+
+def get_period_from_date(date_str: str = '') -> str:
+    """从日期字符串获取YYYY-MM格式"""
+    if not date_str:
+        return datetime.now().strftime('%Y-%m')
+    try:
+        return datetime.strptime(date_str[:10], '%Y-%m-%d').strftime('%Y-%m')
+    except Exception:
+        return datetime.now().strftime('%Y-%m')
+
+
+def format_datetime(dt: Any) -> str:
+    """格式化日期时间为字符串"""
+    return str(dt) if dt else ''
+
+
+def format_task_dates(tasks: List[Dict[str, Any]]) -> None:
+    """格式化任务列表中的日期和权重字段（原地修改）"""
+    for t in tasks:
+        t['created_at'] = format_datetime(t.get('created_at'))
+        t['updated_at'] = format_datetime(t.get('updated_at'))
+        t['weight'] = float(to_decimal(t.get('weight'), DEFAULT_TASK_WEIGHT))
+
+
+def format_doc_dates(docs: List[Dict[str, Any]]) -> None:
+    """格式化验收资料日期字段（原地修改）"""
+    for d in docs:
+        d['uploaded_at'] = format_datetime(d.get('uploaded_at'))
+        d['reviewed_at'] = format_datetime(d.get('reviewed_at'))
+
+
+def is_project_department(project: Optional[str]) -> bool:
+    """判断是否为项目部（非后台/未分配）"""
+    return bool(project and project not in PROJECT_DEPT_EXCLUDE)
+
+
+def classify_org(dept: str) -> Tuple[str, str]:
+    """判断部门所属机构类别
+
+    Returns:
+        (org_category, org_name)
+        org_category: 'project_dept' | 'dispatch' | 'headquarters_office'
+    """
+    if not dept:
+        return 'headquarters_office', '未分配'
+    if any(kw in dept for kw in PROJECT_DEPT_KEYWORDS):
+        return 'project_dept', dept
+    if dept in DISPATCH_DEPTS:
+        return 'dispatch', dept
+    return 'headquarters_office', dept
+
+
+def classify_person_level(cat: str, pos: str, is_ext: bool) -> str:
+    """判断人员层级
+
+    Returns:
+        'team' | 'staff' | 'outsource' | 'external'
+    """
+    if is_ext:
+        return 'external'
+    if cat in ('C1', 'C2'):
+        return 'outsource'
+    is_management = (
+        ('副' in pos) or ('经理' in pos) or ('书记' in pos) or
+        ('部长' in pos) or ('主任' in pos) or ('负责人' in pos) or ('主管' in pos)
+    )
+    if cat == '正式职工' and is_management:
+        return 'team'
+    return 'staff'
+
+
+# ============= 数据库上下文管理器（简化版） =============
 
 class DatabaseContext:
-    """数据库连接上下文管理器，自动处理提交、回滚和关闭"""
+    """数据库连接上下文管理器，自动处理提交、回滚和关闭
+
+    注意：异常在 __exit__ 中已记录日志并回滚，外层不再需要 try/except 包裹
+    """
 
     def __init__(self) -> None:
         self.conn = None
@@ -63,11 +177,12 @@ class DatabaseContext:
         if self.conn:
             if exc_type is not None:
                 self.conn.rollback()
-                logger.error(f"数据库事务回滚: {exc_val}", exc_info=True)
+                # 只在 __exit__ 记录一次日志，外层不再重复记录
+                logger.error(f"数据库操作异常（已回滚）: {exc_val}", exc_info=True)
             else:
                 self.conn.commit()
             self.conn.close()
-        return False
+        return False  # 不吞掉异常，继续向上抛出
 
 
 def get_db_cursor():
@@ -75,10 +190,13 @@ def get_db_cursor():
     return DatabaseContext()
 
 
-# ============= 权限装饰器 =============
+# ============= 权限装饰器（修复重复查询） =============
 
 def login_required(f):
-    """登录校验装饰器，验证请求头中的X-User-Phone"""
+    """登录校验装饰器
+
+    将 user 对象注入被装饰函数的第一个参数，后续装饰器可直接使用
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
         user = get_current_user()
@@ -89,25 +207,21 @@ def login_required(f):
 
 
 def admin_required(f):
-    """管理员权限装饰器（超管+生产管理员+4领导班子）"""
+    """管理员权限装饰器（依赖 login_required 已注入的 user）"""
     @wraps(f)
-    def decorated(*args, **kwargs):
-        user = get_current_user()
-        if not user:
-            return jsonify({'error': '未登录'}), 401
+    def decorated(user: Dict[str, Any], *args, **kwargs):
         if not has_management_right(user['phone']):
             return jsonify({'error': '无权限'}), 403
         return f(user, *args, **kwargs)
+    # 注意：admin_required 必须配合 login_required 使用
+    # 使用方式：@login_required -> @admin_required
     return decorated
 
 
 def reviewer_required(f):
-    """审核权限装饰器（超管+4领导班子）"""
+    """审核权限装饰器（依赖 login_required 已注入的 user）"""
     @wraps(f)
-    def decorated(*args, **kwargs):
-        user = get_current_user()
-        if not user:
-            return jsonify({'error': '未登录'}), 401
+    def decorated(user: Dict[str, Any], *args, **kwargs):
         if not is_reviewer(user['phone']):
             return jsonify({'error': '无审核权限'}), 403
         return f(user, *args, **kwargs)
@@ -117,11 +231,7 @@ def reviewer_required(f):
 # ============= 基础工具函数 =============
 
 def get_current_user() -> Optional[Dict[str, Any]]:
-    """从请求头获取当前用户信息
-
-    Returns:
-        用户字典(phone, name, is_admin)或None
-    """
+    """从请求头获取当前用户信息"""
     phone = request.headers.get('X-User-Phone', '')
     if not phone:
         return None
@@ -142,69 +252,38 @@ def get_my_person(cur, phone: str) -> Optional[Dict[str, Any]]:
 
 def has_management_right(user_phone: str) -> bool:
     """是否有管理权限（超管+生产管理员+4领导班子）"""
-    if user_phone == SUPER_ADMIN_PHONE:
-        return True
-    if user_phone == PRODUCTION_ADMIN_PHONE:
-        return True
-    if user_phone in LEADER_PHONES:
-        return True
-    return False
+    return (
+        user_phone == SUPER_ADMIN_PHONE
+        or user_phone == PRODUCTION_ADMIN_PHONE
+        or user_phone in LEADER_PHONES
+    )
 
 
 def is_reviewer(user_phone: str) -> bool:
     """是否有审核权限（超管+4领导班子）"""
-    if user_phone == SUPER_ADMIN_PHONE:
-        return True
-    if user_phone in LEADER_PHONES:
-        return True
-    return False
+    return user_phone == SUPER_ADMIN_PHONE or user_phone in LEADER_PHONES
 
 
-def get_period_from_date(date_str: str = '') -> str:
-    """从日期字符串获取YYYY-MM格式"""
-    if not date_str:
-        return datetime.now().strftime('%Y-%m')
-    try:
-        return datetime.strptime(date_str[:10], '%Y-%m-%d').strftime('%Y-%m')
-    except Exception:
-        return datetime.now().strftime('%Y-%m')
-
-
-# ============= 核心计算函数 =============
+# ============= 核心计算函数（用 to_decimal/safe_divide 重构） =============
 
 def calculate_kpi_from_tasks(tasks: List[Dict[str, Any]]) -> Decimal:
-    """根据任务列表计算KPI得分（0-100）
-
-    公式：Σ(权重×进度) / Σ(权重)
-    已完成任务按100分计算
-    """
+    """根据任务列表计算KPI得分（0-100）"""
     total_weight = Decimal('0')
     earned = Decimal('0')
     for t in tasks:
-        w = Decimal(str(t.get('weight') or DEFAULT_TASK_WEIGHT))
+        w = to_decimal(t.get('weight'), DEFAULT_TASK_WEIGHT)
         total_weight += w
-        prog = Decimal(str(t.get('progress') or 0))
+        prog = to_decimal(t.get('progress'))
         st = t.get('status') or ''
         if st == STATUS_COMPLETED or prog >= 100:
             earned += w * Decimal('100')
         else:
             earned += w * prog
-    if total_weight > 0:
-        return (earned / total_weight).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    return Decimal('0')
+    return safe_divide(earned, total_weight)
 
 
 def calculate_kpi_score(cur, assignee_name: str, period: str) -> Decimal:
-    """从数据库查询并计算个人KPI得分（0-100）
-
-    Args:
-        cur: 数据库游标
-        assignee_name: 任务执行人姓名
-        period: 考核月份YYYY-MM
-
-    Returns:
-        KPI得分（Decimal，0-100）
-    """
+    """从数据库查询并计算个人KPI得分（0-100）"""
     cur.execute("""
         SELECT
             COALESCE(SUM(weight), 0) AS total_weight,
@@ -217,20 +296,18 @@ def calculate_kpi_score(cur, assignee_name: str, period: str) -> Decimal:
           AND (kpi_period=%s OR (kpi_period='' AND TO_CHAR(created_at, 'YYYY-MM')=%s))
     """, (STATUS_COMPLETED, assignee_name, period, period))
     row = cur.fetchone()
-    total_w = Decimal(str(row['total_weight'] or 0))
-    earned = Decimal(str(row['earned'] or 0))
-    if total_w > 0:
-        return (earned / total_w).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    return Decimal('0')
+    return safe_divide(row['earned'], row['total_weight'])
 
 
 def calculate_output_score(cur, dept: str, period: str) -> Decimal:
     """计算项目部产值完成率得分（0-100）
 
-    公式：实际产值 / 计划产值 × 100
+    使用日期范围查询替代 TO_CHAR，提升性能
     """
     if not dept or dept in PROJECT_DEPT_EXCLUDE:
         return Decimal('0')
+
+    start_date, end_date = get_month_range(period)
     cur.execute("""
         SELECT
             COALESCE(SUM(pl.planned_output), 0) AS planned,
@@ -238,31 +315,21 @@ def calculate_output_score(cur, dept: str, period: str) -> Decimal:
         FROM projects p
         LEFT JOIN project_output_plans pl ON pl.project_id=p.id AND pl.year_month=%s
         LEFT JOIN acceptance_docs a ON a.project_id=p.id
-            AND TO_CHAR(a.uploaded_at, 'YYYY-MM')=%s
+            AND a.uploaded_at >= %s AND a.uploaded_at < %s
         WHERE p.dept=%s AND p.status=%s
-    """, (STATUS_APPROVED, period, period, dept, STATUS_ACTIVE))
+    """, (STATUS_APPROVED, period, start_date, end_date, dept, STATUS_ACTIVE))
     row = cur.fetchone()
-    planned = Decimal(str(row['planned'] or 0))
-    actual = Decimal(str(row['actual'] or 0))
-    if planned > 0:
-        return (actual / planned * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    return Decimal('0')
+    return safe_divide(row['actual'], row['planned'], Decimal('100'))
 
 
-def calculate_eval_score(cur, person_id: Union[int, str], cycle_id: Optional[int] = None) -> Tuple[Decimal, int]:
-    """计算360评价平均分（指定周期内的）
-
-    Args:
-        cur: 数据库游标
-        person_id: 被评价人ID
-        cycle_id: 考核周期ID，None则取最近已关闭周期
-
-    Returns:
-        (平均分Decimal, 评价人数)
-    """
+def calculate_eval_score(
+    cur,
+    person_id: Union[int, str],
+    cycle_id: Optional[int] = None
+) -> Tuple[Decimal, int]:
+    """计算360评价平均分（指定周期内的）"""
     if cycle_id is None:
         cycle_id = get_latest_closed_cycle_id(cur)
-
     if cycle_id is None:
         return Decimal('0'), 0
 
@@ -274,7 +341,7 @@ def calculate_eval_score(cur, person_id: Union[int, str], cycle_id: Optional[int
     row = cur.fetchone()
     avg = row['avg_score'] or 0
     cnt = row['cnt'] or 0
-    return Decimal(str(avg)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), cnt
+    return to_decimal(avg), cnt
 
 
 def get_latest_closed_cycle_id(cur) -> Optional[int]:
@@ -300,11 +367,7 @@ def calculate_final_score(
     eval_score: Decimal,
     is_project_dept: bool
 ) -> Decimal:
-    """计算综合考核分
-
-    后台员工：KPI 60% + 360评价 40%
-    项目部员工：产值 60% + 360评价 40%
-    """
+    """计算综合考核分"""
     if is_project_dept:
         final = output_score * OUTPUT_WEIGHT_RATIO + eval_score * EVAL_WEIGHT_RATIO
     else:
@@ -312,43 +375,12 @@ def calculate_final_score(
     return final.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
-def is_project_department(project: Optional[str]) -> bool:
-    """判断是否为项目部（非后台/未分配）"""
-    return bool(project and project not in PROJECT_DEPT_EXCLUDE)
-
-
-# ============= 格式化工具 =============
-
-def format_datetime(dt: Any) -> str:
-    """格式化日期时间为字符串"""
-    return str(dt) if dt else ''
-
-
-def format_task_dates(tasks: List[Dict[str, Any]]) -> None:
-    """格式化任务列表中的日期和权重字段（原地修改）"""
-    for t in tasks:
-        t['created_at'] = format_datetime(t.get('created_at'))
-        t['updated_at'] = format_datetime(t.get('updated_at'))
-        t['weight'] = float(Decimal(str(t.get('weight') or DEFAULT_TASK_WEIGHT)))
-
-
-def format_doc_dates(docs: List[Dict[str, Any]]) -> None:
-    """格式化验收资料日期字段（原地修改）"""
-    for d in docs:
-        d['uploaded_at'] = format_datetime(d.get('uploaded_at'))
-        d['reviewed_at'] = format_datetime(d.get('reviewed_at'))
-
-
 # ============= KPI 接口 =============
 
 @bp.route('/api/kpi/my-tasks', methods=['GET'])
 @login_required
 def kpi_my_tasks(user: Dict[str, Any]) -> Tuple[Any, int]:
-    """当前用户某月KPI任务列表（含分数）
-
-    Query Params:
-        period (str): 考核月份YYYY-MM，默认当前月
-    """
+    """当前用户某月KPI任务列表（含分数）"""
     period = request.args.get('period', get_period_from_date())
 
     try:
@@ -378,7 +410,7 @@ def kpi_my_tasks(user: Dict[str, Any]) -> Tuple[Any, int]:
             format_task_dates(tasks)
 
             total_weight = sum(
-                Decimal(str(t.get('weight') or DEFAULT_TASK_WEIGHT)) for t in tasks
+                to_decimal(t.get('weight'), DEFAULT_TASK_WEIGHT) for t in tasks
             )
             completed_count = sum(
                 1 for t in tasks
@@ -393,19 +425,16 @@ def kpi_my_tasks(user: Dict[str, Any]) -> Tuple[Any, int]:
                 'total_weight': float(total_weight),
                 'completed_count': completed_count
             }), 200
-    except Exception as e:
-        logger.error(f"获取个人KPI任务失败: {e}", exc_info=True)
+    except Exception:
+        # DatabaseContext.__exit__ 已记录日志并回滚，这里只需返回友好错误
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
 
 
 @bp.route('/api/kpi/team-summary', methods=['GET'])
+@login_required
 @admin_required
 def kpi_team_summary(user: Dict[str, Any]) -> Tuple[Any, int]:
-    """团队某月KPI汇总（管理员可见）
-
-    Query Params:
-        period (str): 考核月份YYYY-MM，默认当前月
-    """
+    """团队某月KPI汇总（管理员可见）"""
     period = request.args.get('period', get_period_from_date())
 
     try:
@@ -421,7 +450,7 @@ def kpi_team_summary(user: Dict[str, Any]) -> Tuple[Any, int]:
                 FROM personnel p
                 LEFT JOIN tasks t ON t.assignee=p.name
                     AND (t.kpi_period=%s OR (t.kpi_period='' AND TO_CHAR(t.created_at, 'YYYY-MM')=%s))
-                WHERE (p.leave_date IS NULL OR p.leave_date='')
+                WHERE (p.leave_date IS NULL OR leave_date='')
                   AND p.position NOT LIKE %s
                   AND p.position NOT LIKE %s
                   AND p.position NOT LIKE %s
@@ -429,21 +458,13 @@ def kpi_team_summary(user: Dict[str, Any]) -> Tuple[Any, int]:
                 ORDER BY earned DESC NULLS LAST
             """, (
                 STATUS_COMPLETED, period, period,
-                POSITION_EXCLUDE_PATTERNS[0],
-                POSITION_EXCLUDE_PATTERNS[1],
-                POSITION_EXCLUDE_PATTERNS[2]
+                *POSITION_EXCLUDE_PATTERNS
             ))
             rows = cur.fetchall()
 
             result = []
             for r in rows:
-                total_w = Decimal(str(r.get('total_weight') or 0))
-                earned = Decimal(str(r.get('earned') or 0))
-                if total_w > 0:
-                    score = (earned / total_w).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-                else:
-                    score = Decimal('0')
-
+                score = safe_divide(r['earned'], r['total_weight'])
                 result.append({
                     'id': r['id'],
                     'name': r['name'],
@@ -455,22 +476,14 @@ def kpi_team_summary(user: Dict[str, Any]) -> Tuple[Any, int]:
                 })
 
             return jsonify({'period': period, 'summary': result}), 200
-    except Exception as e:
-        logger.error(f"获取团队KPI汇总失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
 
 
 @bp.route('/api/kpi/update-source', methods=['POST'])
 @login_required
 def update_task_kpi_source(user: Dict[str, Any]) -> Tuple[Any, int]:
-    """更新任务的KPI来源（任务发布时自动调用）
-
-    Body:
-        task_id (int): 任务ID
-        source (str): 来源类型，默认'manual'
-        weight (int): 权重值
-        kpi_period (str): 考核月份YYYY-MM
-    """
+    """更新任务的KPI来源（任务发布时自动调用）"""
     data = request.json or {}
     task_id = data.get('task_id')
     source = data.get('source', 'manual')
@@ -487,8 +500,7 @@ def update_task_kpi_source(user: Dict[str, Any]) -> Tuple[Any, int]:
                 WHERE id=%s
             """, (source, weight, kpi_period, task_id))
             return jsonify({'success': True}), 200
-    except Exception as e:
-        logger.error(f"更新任务KPI来源失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '更新失败，请稍后重试'}), 500
 
 
@@ -510,12 +522,12 @@ def list_projects(user: Dict[str, Any]) -> Tuple[Any, int]:
             for p in projects:
                 p['created_at'] = format_datetime(p.get('created_at'))
             return jsonify(projects), 200
-    except Exception as e:
-        logger.error(f"获取项目列表失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
 
 
 @bp.route('/api/projects', methods=['POST'])
+@login_required
 @admin_required
 def create_project(user: Dict[str, Any]) -> Tuple[Any, int]:
     """新建项目（仅管理员）"""
@@ -539,8 +551,7 @@ def create_project(user: Dict[str, Any]) -> Tuple[Any, int]:
             ))
             pid = cur.fetchone()['id']
             return jsonify({'success': True, 'id': pid}), 200
-    except Exception as e:
-        logger.error(f"创建项目失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '创建失败，请稍后重试'}), 500
 
 
@@ -581,12 +592,12 @@ def get_project(user: Dict[str, Any], pid: int) -> Tuple[Any, int]:
             project['plans'] = plans
 
             return jsonify(project), 200
-    except Exception as e:
-        logger.error(f"获取项目详情失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
 
 
 @bp.route('/api/projects/<int:pid>/nodes', methods=['POST'])
+@login_required
 @admin_required
 def add_node(user: Dict[str, Any], pid: int) -> Tuple[Any, int]:
     """添加项目节点（仅管理员）"""
@@ -608,8 +619,7 @@ def add_node(user: Dict[str, Any], pid: int) -> Tuple[Any, int]:
             ))
             nid = cur.fetchone()['id']
             return jsonify({'success': True, 'id': nid}), 200
-    except Exception as e:
-        logger.error(f"添加项目节点失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '添加失败，请稍后重试'}), 500
 
 
@@ -640,8 +650,7 @@ def update_node(user: Dict[str, Any], pid: int, nid: int) -> Tuple[Any, int]:
                 WHERE id=%s AND project_id=%s
             """, params)
             return jsonify({'success': True}), 200
-    except Exception as e:
-        logger.error(f"更新节点失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '更新失败，请稍后重试'}), 500
 
 
@@ -665,12 +674,12 @@ def get_output_plan(user: Dict[str, Any]) -> Tuple[Any, int]:
             """, (project_id, year_month))
             plan = cur.fetchone()
             return jsonify(plan or {}), 200
-    except Exception as e:
-        logger.error(f"获取产值计划失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
 
 
 @bp.route('/api/output/plans', methods=['POST'])
+@login_required
 @admin_required
 def upsert_output_plan(user: Dict[str, Any]) -> Tuple[Any, int]:
     """创建/更新产值计划（仅管理员）"""
@@ -695,8 +704,7 @@ def upsert_output_plan(user: Dict[str, Any]) -> Tuple[Any, int]:
                               updated_at=NOW()
             """, (project_id, year_month, planned_output, notes, user['phone']))
             return jsonify({'success': True}), 200
-    except Exception as e:
-        logger.error(f"更新产值计划失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '更新失败，请稍后重试'}), 500
 
 
@@ -710,19 +718,13 @@ def output_dashboard(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     - 安装公司机关：
       - 派出机构：供应链中心、预算中心、其他
       - 机关本部：综合办、商务法务部、财务部等
-
-    Query Params:
-        year_month (str): 月份YYYY-MM，默认当前月
     """
     year_month = request.args.get('year_month', get_period_from_date())
-
-    # 项目部 dept 关键词（一线项目部）
-    PROJECT_DEPT_KEYWORDS = ['项目', '站', '片区', '标段']
-    # 派出机构 dept（外派的部门/团队）
-    DISPATCH_DEPTS = {'供应链分中心', '预算中心', '其他'}
+    start_date, end_date = get_month_range(year_month)
 
     try:
         with get_db_cursor() as cur:
+            # 使用日期范围查询替代 TO_CHAR，性能提升
             cur.execute("""
                 SELECT
                     p.id, p.name, p.dept, p.total_contract_value, per.name AS manager_name,
@@ -733,142 +735,112 @@ def output_dashboard(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
                 LEFT JOIN personnel per ON per.id = p.manager_id
                 LEFT JOIN project_output_plans pl ON pl.project_id = p.id AND pl.year_month = %s
                 LEFT JOIN acceptance_docs a ON a.project_id = p.id
-                    AND TO_CHAR(a.uploaded_at, 'YYYY-MM') = %s
+                    AND a.uploaded_at >= %s AND a.uploaded_at < %s
                 WHERE p.status = %s
                 GROUP BY p.id, p.name, p.dept, p.total_contract_value, per.name, pl.planned_output
                 ORDER BY p.dept, p.name
-            """, (STATUS_APPROVED, STATUS_PENDING, year_month, year_month, STATUS_ACTIVE))
+            """, (STATUS_APPROVED, STATUS_PENDING, year_month, start_date, end_date, STATUS_ACTIVE))
             projects = cur.fetchall()
 
             result = []
+            by_org_name: Dict[str, Dict[str, Any]] = {}
+
             for p in projects:
-                planned = Decimal(str(p.get('planned_output') or 0))
-                actual = Decimal(str(p.get('actual_output') or 0))
-                progress = (actual / planned * Decimal('100')).quantize(
-                    Decimal('0.01'), rounding=ROUND_HALF_UP
-                ) if planned > 0 else Decimal('0')
-
+                planned = to_decimal(p.get('planned_output'))
+                actual = to_decimal(p.get('actual_output'))
+                progress = safe_divide(actual, planned, Decimal('100'))
                 dept = p.get('dept') or '未分配'
+                org_cat, org_name = classify_org(dept)
 
-                # 判断项目所属机构类别
-                is_project_dept = any(kw in dept for kw in PROJECT_DEPT_KEYWORDS)
-                if is_project_dept:
-                    org_category = 'project_dept'
-                    org_name = dept
-                elif dept in DISPATCH_DEPTS:
-                    org_category = 'dispatch'
-                    org_name = dept
-                else:
-                    org_category = 'headquarters_office'
-                    org_name = dept
-
-                result.append({
+                item = {
                     'id': p['id'],
                     'name': p['name'],
                     'dept': dept,
-                    'org_category': org_category,
+                    'org_category': org_cat,
                     'org_name': org_name,
-                    'total_contract_value': float(Decimal(str(p.get('total_contract_value') or 0))),
+                    'total_contract_value': float(to_decimal(p.get('total_contract_value'))),
                     'manager_name': p.get('manager_name') or '',
                     'planned_output': float(planned),
                     'actual_output': float(actual),
                     'progress': float(progress),
                     'pending_docs': p.get('pending_docs') or 0
-                })
+                }
+                result.append(item)
 
-            # 按机构层级分组（一线项目部 / 安装公司机关）
-            org_structure = {
-                'project_dept': {'name': '项目部', 'subgroups': []},
-                'dispatch': {'name': '派出机构', 'subgroups': []},
-                'headquarters_office': {'name': '机关本部', 'subgroups': []}
-            }
-
-            # 先按 org_name 分组
-            by_org_name = {}
-            for r in result:
-                cat = r['org_category']
-                name = r['org_name']
-                if name not in by_org_name:
-                    by_org_name[name] = {'name': name, 'category': cat, 'projects': []}
-                by_org_name[name]['projects'].append(r)
+                # 按 org_name 聚合
+                if org_name not in by_org_name:
+                    by_org_name[org_name] = {
+                        'name': org_name,
+                        'category': org_cat,
+                        'projects': [],
+                        'planned': Decimal('0'),
+                        'actual': Decimal('0'),
+                        'project_count': 0
+                    }
+                g = by_org_name[org_name]
+                g['projects'].append(item)
+                g['planned'] += planned
+                g['actual'] += actual
+                g['project_count'] += 1
 
             # 计算每个 org_name 的汇总
             org_groups = {}
-            for name, data in by_org_name.items():
-                planned = sum(Decimal(str(p['planned_output'])) for p in data['projects'])
-                actual = sum(Decimal(str(p['actual_output'])) for p in data['projects'])
-                progress = (actual / planned * Decimal('100')).quantize(
-                    Decimal('0.01'), rounding=ROUND_HALF_UP
-                ) if planned > 0 else Decimal('0')
+            for name, g in by_org_name.items():
                 org_groups[name] = {
                     'name': name,
-                    'category': data['category'],
-                    'project_count': len(data['projects']),
-                    'planned': float(planned),
-                    'actual': float(actual),
-                    'progress': float(progress),
-                    'projects': data['projects']
+                    'category': g['category'],
+                    'project_count': g['project_count'],
+                    'planned': float(g['planned']),
+                    'actual': float(g['actual']),
+                    'progress': float(safe_divide(g['actual'], g['planned'], Decimal('100'))),
+                    'projects': g['projects']
                 }
 
-            # 填充到 org_structure
-            for name, data in org_groups.items():
-                cat = data['category']
-                org_structure[cat]['subgroups'].append(data)
+            # 构建两级结构
+            def build_org_summary(cat: str, name: str, subgroups: List[Dict]) -> Dict[str, Any]:
+                total_planned = sum(Decimal(str(s['planned'])) for s in subgroups)
+                total_actual = sum(Decimal(str(s['actual'])) for s in subgroups)
+                return {
+                    'category': cat,
+                    'name': name,
+                    'total_planned': float(total_planned),
+                    'total_actual': float(total_actual),
+                    'project_count': sum(s['project_count'] for s in subgroups),
+                    'progress': float(safe_divide(total_actual, total_planned, Decimal('100'))),
+                    'subgroups': subgroups
+                }
 
-            # 一线项目部和机关的二级结构
+            project_dept_groups = [g for g in org_groups.values() if g['category'] == 'project_dept']
+            dispatch_groups = [g for g in org_groups.values() if g['category'] == 'dispatch']
+            hq_office_groups = [g for g in org_groups.values() if g['category'] == 'headquarters_office']
+
             by_org = [
-                {
-                    'category': 'project_dept',
-                    'name': '项目部（一线）',
-                    'total_planned': sum(s['planned'] for s in org_structure['project_dept']['subgroups']),
-                    'total_actual': sum(s['actual'] for s in org_structure['project_dept']['subgroups']),
-                    'project_count': sum(s['project_count'] for s in org_structure['project_dept']['subgroups']),
-                    'subgroups': org_structure['project_dept']['subgroups']
-                },
+                build_org_summary('project_dept', '项目部（一线）', project_dept_groups),
                 {
                     'category': 'headquarters',
                     'name': '安装公司机关',
-                    'total_planned': sum(s['planned'] for s in org_structure['dispatch']['subgroups'] + org_structure['headquarters_office']['subgroups']),
-                    'total_actual': sum(s['actual'] for s in org_structure['dispatch']['subgroups'] + org_structure['headquarters_office']['subgroups']),
-                    'project_count': sum(s['project_count'] for s in org_structure['dispatch']['subgroups'] + org_structure['headquarters_office']['subgroups']),
+                    'total_planned': float(sum(Decimal(str(g['planned'])) for g in dispatch_groups + hq_office_groups)),
+                    'total_actual': float(sum(Decimal(str(g['actual'])) for g in dispatch_groups + hq_office_groups)),
+                    'project_count': sum(g['project_count'] for g in dispatch_groups + hq_office_groups),
+                    'progress': float(safe_divide(
+                        sum(Decimal(str(g['actual'])) for g in dispatch_groups + hq_office_groups),
+                        sum(Decimal(str(g['planned'])) for g in dispatch_groups + hq_office_groups),
+                        Decimal('100')
+                    )),
                     'subgroups': [
-                        {
-                            'sub_name': '派出机构',
-                            'sub_category': 'dispatch',
-                            'subgroups': org_structure['dispatch']['subgroups']
-                        },
-                        {
-                            'sub_name': '机关本部',
-                            'sub_category': 'headquarters_office',
-                            'subgroups': org_structure['headquarters_office']['subgroups']
-                        }
+                        {'sub_name': '派出机构', 'sub_category': 'dispatch', 'subgroups': dispatch_groups},
+                        {'sub_name': '机关本部', 'sub_category': 'headquarters_office', 'subgroups': hq_office_groups}
                     ]
                 }
             ]
 
-            # 计算安装公司机关的总进度
-            for org in by_org:
-                if org['category'] == 'headquarters':
-                    if org['total_planned'] > 0:
-                        org['progress'] = float((Decimal(str(org['total_actual'])) / Decimal(str(org['total_planned'])) * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
-                    else:
-                        org['progress'] = 0
-
-            for org in by_org:
-                if org['category'] == 'project_dept':
-                    if org['total_planned'] > 0:
-                        org['progress'] = float((Decimal(str(org['total_actual'])) / Decimal(str(org['total_planned'])) * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
-                    else:
-                        org['progress'] = 0
-
             return jsonify({
                 'year_month': year_month,
                 'projects': result,
-                'by_dept': list(org_groups.values()),  # 兼容老字段
+                'by_dept': list(org_groups.values()),
                 'by_org': by_org
             }), 200
-    except Exception as e:
-        logger.error(f"获取产值看板失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
 
 
@@ -877,13 +849,7 @@ def output_dashboard(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
 @bp.route('/api/acceptance-docs', methods=['GET'])
 @login_required
 def list_acceptance_docs(user: Dict[str, Any]) -> Tuple[Any, int]:
-    """验收资料列表
-
-    Query Params:
-        project_id (int): 项目ID
-        status (str): 审核状态（pending/approved/rejected）
-        year_month (str): 上传月份YYYY-MM
-    """
+    """验收资料列表"""
     project_id = request.args.get('project_id', type=int)
     status = request.args.get('status', '')
     year_month = request.args.get('year_month', '')
@@ -899,8 +865,10 @@ def list_acceptance_docs(user: Dict[str, Any]) -> Tuple[Any, int]:
                 conditions.append("a.review_status=%s")
                 params.append(status)
             if year_month:
-                conditions.append("TO_CHAR(a.uploaded_at, 'YYYY-MM')=%s")
-                params.append(year_month)
+                # 同样优化为范围查询
+                start, end = get_month_range(year_month)
+                conditions.append("a.uploaded_at >= %s AND a.uploaded_at < %s")
+                params.extend([start, end])
 
             sql = f"""
                 SELECT a.*, p.name AS project_name
@@ -913,8 +881,7 @@ def list_acceptance_docs(user: Dict[str, Any]) -> Tuple[Any, int]:
             docs = cur.fetchall()
             format_doc_dates(docs)
             return jsonify(docs), 200
-    except Exception as e:
-        logger.error(f"获取验收资料失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
 
 
@@ -945,20 +912,15 @@ def upload_acceptance_doc(user: Dict[str, Any]) -> Tuple[Any, int]:
             ))
             did = cur.fetchone()['id']
             return jsonify({'success': True, 'id': did}), 200
-    except Exception as e:
-        logger.error(f"上传验收资料失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '上传失败，请稍后重试'}), 500
 
 
 @bp.route('/api/acceptance-docs/<int:did>/review', methods=['POST'])
+@login_required
 @reviewer_required
 def review_acceptance_doc(user: Dict[str, Any], did: int) -> Tuple[Any, int]:
-    """审核验收资料（领导班子/超管）
-
-    Body:
-        action (str): 'approve'或'reject'
-        comment (str): 审核意见
-    """
+    """审核验收资料（领导班子/超管）"""
     data = request.json or {}
     action = data.get('action')
     comment = data.get('comment', '')
@@ -980,8 +942,7 @@ def review_acceptance_doc(user: Dict[str, Any], did: int) -> Tuple[Any, int]:
                 WHERE id=%s
             """, (status, user['phone'], user['name'], comment, did))
             return jsonify({'success': True}), 200
-    except Exception as e:
-        logger.error(f"审核验收资料失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '审核失败，请稍后重试'}), 500
 
 
@@ -990,17 +951,7 @@ def review_acceptance_doc(user: Dict[str, Any], did: int) -> Tuple[Any, int]:
 @bp.route('/api/assessment/my-score', methods=['GET'])
 @login_required
 def my_assessment_score(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
-    """我的综合考核分（KPI + 产值 + 360评价）
-
-    360评价按考核周期取分：
-    - 指定 cycle_id：用该周期的评价分
-    - 未指定：自动取最近已关闭的考核周期
-
-    考核周期关闭后，分数自动可用（无需手动同步）。
-
-    后台员工：任务KPI 60% + 360评价 40%
-    项目部员工：产值 60% + 360评价 40%
-    """
+    """我的综合考核分（KPI + 产值 + 360评价）"""
     period = request.args.get('period', get_period_from_date())
     cycle_id = request.args.get('cycle_id', type=int)
 
@@ -1045,62 +996,37 @@ def my_assessment_score(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
                 'is_project_dept': is_proj,
                 'has_cycle': bool(cycle_info)
             }), 200
-    except Exception as e:
-        logger.error(f"获取个人综合考核分失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
 
 
 @bp.route('/api/assessment/team-score', methods=['GET'])
+@login_required
 @admin_required
 def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
-    """团队综合考核分（管理员）
-
-    计算所有在职非辅助人员的综合考核分，按得分降序。
-    360评价按指定周期取分（未指定则用最近已关闭周期）。
-
-    Query Params:
-        period (str): 考核月份
-        cycle_id (int): 考核周期ID（可选）
-        level (str): 人员层级过滤
-            - 'team'      团队（副部长及以上：经理/书记/部长/主任/负责人/主管/副*）
-            - 'staff'     普通职工（正式职工中除管理层之外）
-            - 'outsource' 外包人员（C1+C2）
-            - 'external'  外协人员（is_external=true）
-            - 'all' 或不传 全部（包含正式职工+外包+外协）
-
-    说明：正式职工 = 团队 + 普通职工（管理层 + 非管理层）
-
-    后台员工：任务KPI 60% + 360评价 40%
-    项目部员工：产值 60% + 360评价 40%
-    """
+    """团队综合考核分（管理员）"""
     period = request.args.get('period', get_period_from_date())
     cycle_id = request.args.get('cycle_id', type=int)
     level = request.args.get('level', 'all')
 
-    # 人员层级过滤SQL条件
-    # psycopg2 用 %s 占位符时，SQL 中的字面量 % 必须转义为 %%
-    if level == 'team':
-        level_condition = """AND category='正式职工' AND (
+    # 人员层级过滤SQL条件（psycopg2 中 % 需转义为 %%）
+    LEVEL_CONDITIONS = {
+        'team': """AND category='正式职工' AND (
             position LIKE '%%经理%%' OR position LIKE '%%书记%%' OR
             position LIKE '%%部长%%' OR position LIKE '%%主任%%' OR
             position LIKE '%%负责人%%' OR position LIKE '%%主管%%' OR
             position LIKE '%%副%%'
-        ) AND (is_external=false OR is_external IS NULL)"""
-    elif level == 'staff':
-        level_condition = """AND category='正式职工' AND (
+        ) AND (is_external=false OR is_external IS NULL)""",
+        'staff': """AND category='正式职工' AND (
             position NOT LIKE '%%经理%%' AND position NOT LIKE '%%书记%%' AND
             position NOT LIKE '%%部长%%' AND position NOT LIKE '%%主任%%' AND
             position NOT LIKE '%%负责人%%' AND position NOT LIKE '%%主管%%' AND
             position NOT LIKE '%%副%%'
-        ) AND (is_external=false OR is_external IS NULL)"""
-    elif level == 'outsource':
-        # 外包人员 = C1 + C2（排除 is_external=true 的外派）
-        level_condition = "AND category IN ('C1', 'C2') AND (is_external=false OR is_external IS NULL)"
-    elif level == 'external':
-        # 外协/外派人员 = is_external=true（含 dept=其他 的外派人员）
-        level_condition = "AND is_external=true"
-    else:
-        level_condition = ""
+        ) AND (is_external=false OR is_external IS NULL)""",
+        'outsource': "AND category IN ('C1', 'C2') AND (is_external=false OR is_external IS NULL)",
+        'external': "AND is_external=true",
+    }
+    level_condition = LEVEL_CONDITIONS.get(level, '')
 
     try:
         with get_db_cursor() as cur:
@@ -1120,15 +1046,11 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
             actual_cycle_id = cycle_id or get_latest_closed_cycle_id(cur)
             cycle_info = get_cycle_info(cur, actual_cycle_id) if actual_cycle_id else None
 
-            # 按层级分组统计
-            level_stats = {'team': 0, 'staff': 0, 'outsource': 0, 'external': 0}
-
-            # 批量查询：避免 N+1 查询（每个 person 多次查询）
             person_ids = [p['id'] for p in personnel]
             person_names = [p['name'] for p in personnel]
 
             # 批量 KPI 分（一次查询）
-            kpi_map = {}
+            kpi_map: Dict[str, Decimal] = {}
             if person_names:
                 cur.execute("""
                     SELECT assignee,
@@ -1143,12 +1065,10 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
                     GROUP BY assignee
                 """, (STATUS_COMPLETED, person_names, period, period))
                 for r in cur.fetchall():
-                    tw = Decimal(str(r['tw'] or 0))
-                    earned = Decimal(str(r['earned'] or 0))
-                    kpi_map[r['assignee']] = (earned / tw).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if tw > 0 else Decimal('0')
+                    kpi_map[r['assignee']] = safe_divide(r['earned'], r['tw'])
 
-            # 批量 360 评价分（按周期过滤）
-            eval_map = {}
+            # 批量 360 评价分
+            eval_map: Dict[Any, Tuple[Decimal, int]] = {}
             if person_ids and actual_cycle_id:
                 cur.execute("""
                     SELECT evaluatee_id,
@@ -1159,13 +1079,13 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
                     GROUP BY evaluatee_id
                 """, (person_ids, actual_cycle_id))
                 for r in cur.fetchall():
-                    avg = r['avg_score'] or 0
                     eval_map[r['evaluatee_id']] = (
-                        Decimal(str(avg)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP),
+                        to_decimal(r['avg_score']),
                         r['cnt'] or 0
                     )
 
-            # 按部门预计算产值（一次查询）
+            # 按部门预计算产值（一次查询，使用范围查询优化）
+            start_date, end_date = get_month_range(period)
             cur.execute("""
                 SELECT p.dept,
                        COALESCE(SUM(pl.planned_output), 0) AS planned,
@@ -1173,51 +1093,39 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
                 FROM projects p
                 LEFT JOIN project_output_plans pl ON pl.project_id=p.id AND pl.year_month=%s
                 LEFT JOIN acceptance_docs a ON a.project_id=p.id
-                    AND TO_CHAR(a.uploaded_at, 'YYYY-MM')=%s
+                    AND a.uploaded_at >= %s AND a.uploaded_at < %s
                 WHERE p.status=%s
                 GROUP BY p.dept
-            """, (STATUS_APPROVED, period, period, STATUS_ACTIVE))
-            dept_output = {}
-            for r in cur.fetchall():
-                planned = Decimal(str(r['planned'] or 0))
-                actual = Decimal(str(r['actual'] or 0))
-                score = (actual / planned * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if planned > 0 else Decimal('0')
-                dept_output[r['dept'] or ''] = float(score)
+            """, (STATUS_APPROVED, period, start_date, end_date, STATUS_ACTIVE))
+            dept_output = {
+                r['dept'] or '': float(safe_divide(r['actual'], r['planned'], Decimal('100')))
+                for r in cur.fetchall()
+            }
 
             result = []
+            level_stats = {'team': 0, 'staff': 0, 'outsource': 0, 'external': 0}
+
             for p in personnel:
-                # 1. KPI分（从批量结果取）
+                # 1. KPI分
                 kpi_score = kpi_map.get(p['name'], Decimal('0'))
 
-                # 2. 产值分（按部门从预计算结果取）
+                # 2. 产值分
                 project_dept = p.get('project') or ''
                 is_proj = is_project_department(project_dept)
                 output_score = Decimal(str(dept_output.get(project_dept, 0))) if is_proj else Decimal('0')
 
-                # 3. 360评价分（从批量结果取）
+                # 3. 360评价分
                 eval_score, eval_count = eval_map.get(p['id'], (Decimal('0'), 0))
 
+                # 综合分
                 final_score = calculate_final_score(kpi_score, output_score, eval_score, is_proj)
 
-                # 人员层级归类
-                cat = p.get('category') or ''
-                is_ext = p.get('is_external') or False
-                pos = p.get('position') or ''
-
-                # 团队判定：position 包含副/经理/书记/部长/主任/负责人/主管
-                is_management = (
-                    ('副' in pos) or ('经理' in pos) or ('书记' in pos) or
-                    ('部长' in pos) or ('主任' in pos) or ('负责人' in pos) or ('主管' in pos)
+                # 人员层级
+                plevel = classify_person_level(
+                    p.get('category') or '',
+                    p.get('position') or '',
+                    p.get('is_external') or False
                 )
-
-                if is_ext:
-                    plevel = 'external'
-                elif cat in ('C1', 'C2'):
-                    plevel = 'outsource'
-                elif cat == '正式职工' and is_management:
-                    plevel = 'team'
-                else:
-                    plevel = 'staff'
                 level_stats[plevel] += 1
 
                 result.append({
@@ -1225,9 +1133,9 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
                     'name': p['name'],
                     'dept': p.get('dept') or '',
                     'project': project_dept,
-                    'position': pos,
-                    'category': cat,
-                    'is_external': is_ext,
+                    'position': p.get('position') or '',
+                    'category': p.get('category') or '',
+                    'is_external': p.get('is_external') or False,
                     'person_level': plevel,
                     'is_project_dept': is_proj,
                     'kpi_score': float(kpi_score),
@@ -1246,18 +1154,14 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
                 'level_stats': level_stats,
                 'scores': result
             }), 200
-    except Exception as e:
-        logger.error(f"获取团队综合考核分失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
 
 
 @bp.route('/api/assessment/cycles', methods=['GET'])
 @login_required
 def list_assessment_cycles(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
-    """获取考核周期列表（综合考核用）
-
-    返回已关闭的周期列表（按ID倒序）和当前活跃周期。
-    """
+    """获取考核周期列表（综合考核用）"""
     try:
         with get_db_cursor() as cur:
             cur.execute("""
@@ -1267,6 +1171,5 @@ def list_assessment_cycles(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
             """)
             cycles = cur.fetchall()
             return jsonify({'cycles': cycles or []}), 200
-    except Exception as e:
-        logger.error(f"获取考核周期列表失败: {e}", exc_info=True)
+    except Exception:
         return jsonify({'error': '获取数据失败，请稍后重试'}), 500
