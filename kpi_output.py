@@ -971,47 +971,175 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     计算所有在职非辅助人员的综合考核分，按得分降序。
     360评价按指定周期取分（未指定则用最近已关闭周期）。
 
+    Query Params:
+        period (str): 考核月份
+        cycle_id (int): 考核周期ID（可选）
+        level (str): 人员层级过滤
+            - 'team'      团队（副部长及以上：经理/书记/部长/主任/负责人/主管/副*）
+            - 'staff'     普通职工（正式职工中除管理层之外）
+            - 'outsource' 外包人员（C1+C2）
+            - 'external'  外协人员（is_external=true）
+            - 'all' 或不传 全部（包含正式职工+外包+外协）
+
+    说明：正式职工 = 团队 + 普通职工（管理层 + 非管理层）
+
     后台员工：任务KPI 60% + 360评价 40%
     项目部员工：产值 60% + 360评价 40%
     """
     period = request.args.get('period', get_period_from_date())
     cycle_id = request.args.get('cycle_id', type=int)
+    level = request.args.get('level', 'all')
+
+    # 人员层级过滤SQL条件
+    # psycopg2 用 %s 占位符时，SQL 中的字面量 % 必须转义为 %%
+    if level == 'team':
+        level_condition = """AND category='正式职工' AND (
+            position LIKE '%%经理%%' OR position LIKE '%%书记%%' OR
+            position LIKE '%%部长%%' OR position LIKE '%%主任%%' OR
+            position LIKE '%%负责人%%' OR position LIKE '%%主管%%' OR
+            position LIKE '%%副%%'
+        ) AND (is_external=false OR is_external IS NULL)"""
+    elif level == 'staff':
+        level_condition = """AND category='正式职工' AND (
+            position NOT LIKE '%%经理%%' AND position NOT LIKE '%%书记%%' AND
+            position NOT LIKE '%%部长%%' AND position NOT LIKE '%%主任%%' AND
+            position NOT LIKE '%%负责人%%' AND position NOT LIKE '%%主管%%' AND
+            position NOT LIKE '%%副%%'
+        ) AND (is_external=false OR is_external IS NULL)"""
+    elif level == 'outsource':
+        level_condition = "AND category IN ('C1', 'C2')"
+    elif level == 'external':
+        level_condition = "AND is_external=true"
+    else:
+        level_condition = ""
 
     try:
         with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT id, name, dept, project, position
+            sql = f"""
+                SELECT id, name, dept, project, position, category, is_external
                 FROM personnel
                 WHERE (leave_date IS NULL OR leave_date='')
                   AND position NOT LIKE %s
                   AND position NOT LIKE %s
                   AND position NOT LIKE %s
+                  {level_condition}
                 ORDER BY project, dept, name
-            """, POSITION_EXCLUDE_PATTERNS)
+            """
+            cur.execute(sql, POSITION_EXCLUDE_PATTERNS)
             personnel = cur.fetchall()
 
-            # 自动确定考核周期
             actual_cycle_id = cycle_id or get_latest_closed_cycle_id(cur)
             cycle_info = get_cycle_info(cur, actual_cycle_id) if actual_cycle_id else None
 
+            # 按层级分组统计
+            level_stats = {'team': 0, 'staff': 0, 'outsource': 0, 'external': 0}
+
+            # 批量查询：避免 N+1 查询（每个 person 多次查询）
+            person_ids = [p['id'] for p in personnel]
+            person_names = [p['name'] for p in personnel]
+
+            # 批量 KPI 分（一次查询）
+            kpi_map = {}
+            if person_names:
+                cur.execute("""
+                    SELECT assignee,
+                           COALESCE(SUM(weight), 0) AS tw,
+                           COALESCE(SUM(CASE
+                               WHEN status=%s OR COALESCE(progress,0)>=100 THEN weight*100
+                               ELSE weight*COALESCE(progress,0)
+                           END), 0) AS earned
+                    FROM tasks
+                    WHERE assignee = ANY(%s)
+                      AND (kpi_period=%s OR (kpi_period='' AND TO_CHAR(created_at, 'YYYY-MM')=%s))
+                    GROUP BY assignee
+                """, (STATUS_COMPLETED, person_names, period, period))
+                for r in cur.fetchall():
+                    tw = Decimal(str(r['tw'] or 0))
+                    earned = Decimal(str(r['earned'] or 0))
+                    kpi_map[r['assignee']] = (earned / tw).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if tw > 0 else Decimal('0')
+
+            # 批量 360 评价分（按周期过滤）
+            eval_map = {}
+            if person_ids and actual_cycle_id:
+                cur.execute("""
+                    SELECT evaluatee_id,
+                           AVG(total_score) AS avg_score,
+                           COUNT(*) AS cnt
+                    FROM evaluation_scores
+                    WHERE evaluatee_id = ANY(%s) AND cycle_id=%s
+                    GROUP BY evaluatee_id
+                """, (person_ids, actual_cycle_id))
+                for r in cur.fetchall():
+                    avg = r['avg_score'] or 0
+                    eval_map[r['evaluatee_id']] = (
+                        Decimal(str(avg)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP),
+                        r['cnt'] or 0
+                    )
+
+            # 按部门预计算产值（一次查询）
+            cur.execute("""
+                SELECT p.dept,
+                       COALESCE(SUM(pl.planned_output), 0) AS planned,
+                       COALESCE(SUM(CASE WHEN a.review_status=%s THEN a.output_value ELSE 0 END), 0) AS actual
+                FROM projects p
+                LEFT JOIN project_output_plans pl ON pl.project_id=p.id AND pl.year_month=%s
+                LEFT JOIN acceptance_docs a ON a.project_id=p.id
+                    AND TO_CHAR(a.uploaded_at, 'YYYY-MM')=%s
+                WHERE p.status=%s
+                GROUP BY p.dept
+            """, (STATUS_APPROVED, period, period, STATUS_ACTIVE))
+            dept_output = {}
+            for r in cur.fetchall():
+                planned = Decimal(str(r['planned'] or 0))
+                actual = Decimal(str(r['actual'] or 0))
+                score = (actual / planned * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP) if planned > 0 else Decimal('0')
+                dept_output[r['dept'] or ''] = float(score)
+
             result = []
             for p in personnel:
-                kpi_score = calculate_kpi_score(cur, p['name'], period)
+                # 1. KPI分（从批量结果取）
+                kpi_score = kpi_map.get(p['name'], Decimal('0'))
 
+                # 2. 产值分（按部门从预计算结果取）
                 project_dept = p.get('project') or ''
                 is_proj = is_project_department(project_dept)
-                output_score = calculate_output_score(cur, project_dept, period) if is_proj else Decimal('0')
+                output_score = Decimal(str(dept_output.get(project_dept, 0))) if is_proj else Decimal('0')
 
-                eval_score, eval_count = calculate_eval_score(cur, p['id'], actual_cycle_id)
+                # 3. 360评价分（从批量结果取）
+                eval_score, eval_count = eval_map.get(p['id'], (Decimal('0'), 0))
 
                 final_score = calculate_final_score(kpi_score, output_score, eval_score, is_proj)
+
+                # 人员层级归类
+                cat = p.get('category') or ''
+                is_ext = p.get('is_external') or False
+                pos = p.get('position') or ''
+
+                # 团队判定：position 包含副/经理/书记/部长/主任/负责人/主管
+                is_management = (
+                    ('副' in pos) or ('经理' in pos) or ('书记' in pos) or
+                    ('部长' in pos) or ('主任' in pos) or ('负责人' in pos) or ('主管' in pos)
+                )
+
+                if is_ext:
+                    plevel = 'external'
+                elif cat in ('C1', 'C2'):
+                    plevel = 'outsource'
+                elif cat == '正式职工' and is_management:
+                    plevel = 'team'
+                else:
+                    plevel = 'staff'
+                level_stats[plevel] += 1
 
                 result.append({
                     'id': p['id'],
                     'name': p['name'],
                     'dept': p.get('dept') or '',
                     'project': project_dept,
-                    'position': p.get('position') or '',
+                    'position': pos,
+                    'category': cat,
+                    'is_external': is_ext,
+                    'person_level': plevel,
                     'is_project_dept': is_proj,
                     'kpi_score': float(kpi_score),
                     'output_score': float(output_score),
@@ -1025,6 +1153,8 @@ def team_assessment_scores(user: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
                 'period': period,
                 'cycle_id': actual_cycle_id,
                 'cycle_name': cycle_info['name'] if cycle_info else '',
+                'level': level,
+                'level_stats': level_stats,
                 'scores': result
             }), 200
     except Exception as e:
