@@ -1226,11 +1226,22 @@ def export_data():
 
         where_clause = ""
         if export_type == 'regular':
-            where_clause = "WHERE is_external = false"
+            where_clause = "WHERE p.is_external = false"
         elif export_type == 'external':
-            where_clause = "WHERE is_external = true"
+            where_clause = "WHERE p.is_external = true"
 
-        cur.execute(f"SELECT * FROM personnel {where_clause}")
+        if export_type == 'salary':
+            # 工资导出：关联salary表
+            cur.execute(f"""
+                SELECT p.*, s.base_salary, s.edu_salary, s.skill_salary,
+                       s.seniority_salary, s.guarantee_salary, s.settlement_fee,
+                       s.talent_allowance, s.effective_date
+                FROM personnel p
+                LEFT JOIN salary s ON p.id = s.person_id
+                {where_clause}
+            """)
+        else:
+            cur.execute(f"SELECT * FROM personnel p {where_clause}")
         people = cur.fetchall()
         cur.close()
         conn.close()
@@ -1291,8 +1302,8 @@ def export_data():
             'salary': {
                 'filename': '安装公司工资数据.xlsx',
                 'sheet_title': '工资数据',
-                'headers': ['序号', '姓名', '工号', '部门', '基本工资', '岗位工资', '绩效工资',
-                           '津贴', '应发合计', '社保扣除', '公积金扣除', '个税', '实发工资'],
+                'headers': ['序号', '姓名', '工号', '部门', '岗位工资', '学历工资', '技能工资',
+                           '工龄工资', '最低保障工资', '结算费', '人才津贴', '合计', '入职日期', '生效日期'],
                 'need_group': False
             },
             'project': {
@@ -1376,19 +1387,18 @@ def export_data():
                 ]
 
             elif export_type == 'salary':
-                base = float(p.get('base_salary', 0) or 0) if p.get('base_salary') else 0
-                position_sal = float(p.get('position_salary', 0) or 0) if p.get('position_salary') else 0
-                performance = float(p.get('performance_salary', 0) or 0) if p.get('performance_salary') else 0
-                allowance = float(p.get('allowance', 0) or 0) if p.get('allowance') else 0
-                social = float(p.get('social_deduction', 0) or 0) if p.get('social_deduction') else 0
-                housing = float(p.get('housing_deduction', 0) or 0) if p.get('housing_deduction') else 0
-                tax = float(p.get('tax', 0) or 0) if p.get('tax') else 0
-
-                total = base + position_sal + performance + allowance
+                # 从salary表获取细分工资
+                base = float(p.get('base_salary', 0) or 0)
+                edu = float(p.get('edu_salary', 0) or 0)
+                skill = float(p.get('skill_salary', 0) or 0)
+                seniority = float(p.get('seniority_salary', 0) or 0)
+                guarantee = float(p.get('guarantee_salary', 0) or 0)
+                settlement = float(p.get('settlement_fee', 0) or 0)
+                talent = float(p.get('talent_allowance', 0) or 0)
+                total = base + edu + skill + seniority + guarantee + settlement + talent
+                # 如果salary表没数据，用personnel.salary兜底
                 if total == 0 and p.get('salary'):
                     total = float(p['salary'])
-
-                net = total - social - housing - tax
 
                 return [
                     idx + 1,
@@ -1396,14 +1406,15 @@ def export_data():
                     p.get('id', ''),
                     dept,
                     base if base else '',
-                    position_sal if position_sal else '',
-                    performance if performance else '',
-                    allowance if allowance else '',
+                    edu if edu else '',
+                    skill if skill else '',
+                    seniority if seniority else '',
+                    guarantee if guarantee else '',
+                    settlement if settlement else '',
+                    talent if talent else '',
                     total if total else '',
-                    social if social else '',
-                    housing if housing else '',
-                    tax if tax else '',
-                    net if net else ''
+                    p.get('hire_date', ''),
+                    p.get('effective_date', '')
                 ]
 
             elif export_type in ('project', 'dept'):
