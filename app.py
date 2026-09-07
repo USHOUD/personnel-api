@@ -1185,6 +1185,20 @@ def export_data():
                 'error': f'无效的导出类型，可选: {", ".join(valid_types)}'
             }), 400
 
+        # ---------- 权限校验：salary和all只有管理员/领导班子可导出 ----------
+        if export_type in ('salary', 'all'):
+            user_phone = request.headers.get('X-User-Phone', '')
+            conn_auth = get_db()
+            cur_auth = conn_auth.cursor()
+            cur_auth.execute("SELECT is_admin, role FROM personnel WHERE phone = %s", (user_phone,))
+            auth_user = cur_auth.fetchone()
+            cur_auth.close()
+            conn_auth.close()
+            is_admin = auth_user and auth_user.get('is_admin', False)
+            is_leader = auth_user and auth_user.get('role', '') == 'leader'
+            if not is_admin and not is_leader:
+                return jsonify({'error': '暂无导出权限'}), 403
+
         # ---------- 2. 数据库查询 ----------
         conn = get_db()
         cur = conn.cursor()
