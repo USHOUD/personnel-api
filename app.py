@@ -1186,6 +1186,7 @@ def export_data():
             }), 400
 
         # ---------- 权限校验：salary和all只有管理员/领导班子可导出 ----------
+        can_view_sensitive = False  # 是否可看身份证等敏感字段
         if export_type in ('salary', 'all'):
             try:
                 user_phone = request.headers.get('X-User-Phone', '')
@@ -1199,9 +1200,25 @@ def export_data():
                 is_leader = auth_user and auth_user.get('role', '') == 'leader'
                 if not is_admin and not is_leader:
                     return jsonify({'error': '暂无导出权限'}), 403
+                can_view_sensitive = True
             except Exception as auth_err:
                 print(f"[export] 权限校验跳过: {auth_err}")
-                # 权限校验失败时不阻断，前端已有隐藏控制
+                can_view_sensitive = True  # 校验失败默认放行
+        else:
+            # 非salary/all类型，也检查是否可看敏感字段
+            try:
+                user_phone = request.headers.get('X-User-Phone', '')
+                conn_auth = get_db()
+                cur_auth = conn_auth.cursor()
+                cur_auth.execute("SELECT is_admin, role FROM personnel WHERE phone = %s", (user_phone,))
+                auth_user = cur_auth.fetchone()
+                cur_auth.close()
+                conn_auth.close()
+                is_admin = auth_user and auth_user.get('is_admin', False)
+                is_leader = auth_user and auth_user.get('role', '') == 'leader'
+                can_view_sensitive = is_admin or is_leader
+            except Exception:
+                can_view_sensitive = False
 
         # ---------- 2. 数据库查询 ----------
         conn = get_db()
@@ -1333,6 +1350,7 @@ def export_data():
         # ---------- 7. 数据映射函数 ----------
         def get_row_data(p, idx, export_type):
             dept = p.get('dept', '') or get_dept(p)
+            id_card = p.get('id_card', '') if can_view_sensitive else '***'
 
             if export_type in ('all', 'regular', 'external'):
                 return [
@@ -1340,7 +1358,7 @@ def export_data():
                     p['id'],
                     p['name'],
                     p.get('gender', ''),
-                    p.get('id_card', ''),
+                    id_card,
                     p.get('birth', ''),
                     p.get('edu', ''),
                     p.get('hometown', ''),
@@ -1350,7 +1368,7 @@ def export_data():
                     p.get('phone', ''),
                     p.get('cert', ''),
                     p.get('category', ''),
-                    float(p['salary']) if p.get('salary') else 0,
+                    float(p['salary']) if p.get('salary') and can_view_sensitive else '',
                     p.get('status', ''),
                     p.get('status_detail', ''),
                     p.get('hire_date', ''),
