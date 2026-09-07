@@ -1467,17 +1467,17 @@ def export_data():
         for row in range(2, current_row):
             ws.row_dimensions[row].height = 22
 
-        # ---------- 10. 输出文件 ----------
+        # ---------- 10. 输出文件（base64，走云托管通道） ----------
+        import base64
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
+        b64_data = base64.b64encode(output.read()).decode('utf-8')
 
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=config['filename']
-        )
+        return jsonify({
+            'filename': config['filename'],
+            'data': b64_data
+        })
 
     except Exception as e:
         import traceback
