@@ -1169,115 +1169,320 @@ def get_statistics():
 
 @app.route('/api/export')
 def export_data():
-    """导出人员数据为Excel"""
+    """导出人员数据为Excel，支持多种导出类型"""
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from flask import send_file, request
+    from itertools import groupby
+
     try:
-        import io
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, Alignment, Border, Side
-        from flask import send_file
-        
+        # ---------- 1. 参数校验 ----------
+        export_type = request.args.get('type', 'all')
+        valid_types = {'all', 'regular', 'external', 'salary', 'project', 'dept'}
+        if export_type not in valid_types:
+            return jsonify({
+                'error': f'无效的导出类型，可选: {", ".join(valid_types)}'
+            }), 400
+
+        # ---------- 2. 数据库查询 ----------
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM personnel")
+
+        where_clause = ""
+        if export_type == 'regular':
+            where_clause = "WHERE is_external = false"
+        elif export_type == 'external':
+            where_clause = "WHERE is_external = true"
+
+        cur.execute(f"SELECT * FROM personnel {where_clause}")
         people = cur.fetchall()
         cur.close()
         conn.close()
-        
-        # 排序（与小程序一致）
+
+        if not people:
+            return jsonify({'error': '暂无数据可导出'}), 204
+
+        # ---------- 3. 排序（与小程序一致） ----------
         def sort_key(p):
             fixed_order = {'邱方恒': 0, '廖志成': 1, '吕亮': 2, '李强': 3}
             fixed = fixed_order.get(p['name'], 99)
             cat_order = {'正式职工': 0, 'C1': 1, 'C2': 2}
             cat = cat_order.get(p.get('category', ''), 3)
             project = p.get('project', '') or ''
-            if project == '后台': proj = 0
-            elif project and project != '其他': proj = 1
-            else: proj = 2
+            if project == '后台':
+                proj = 0
+            elif project and project != '其他':
+                proj = 1
+            else:
+                proj = 2
             position = (p.get('position', '') or '').lower()
-            if any(k in position for k in ['经理', '书记']): pos = 0
-            elif any(k in position for k in ['部长', '主管', '副部长']): pos = 1
-            else: pos = 2
+            if any(k in position for k in ['经理', '书记']):
+                pos = 0
+            elif any(k in position for k in ['部长', '主管', '副部长']):
+                pos = 1
+            else:
+                pos = 2
             return (fixed, cat, proj, pos, p.get('name', ''))
-        
+
         people.sort(key=sort_key)
-        
+
+        # ---------- 4. 类型配置中心 ----------
+        TYPE_CONFIG = {
+            'all': {
+                'filename': '安装公司全部人员花名册.xlsx',
+                'sheet_title': '全部人员名单',
+                'headers': ['序号', 'ID', '姓名', '性别', '身份证号', '出生日期', '学历', '籍贯',
+                           '岗位', '部门', '项目', '电话', '证书', '类别', '工资',
+                           '状态', '状态详情', '入职日期', '离职日期'],
+                'need_group': False
+            },
+            'regular': {
+                'filename': '安装公司正式职工花名册.xlsx',
+                'sheet_title': '正式职工名单',
+                'headers': ['序号', 'ID', '姓名', '性别', '身份证号', '出生日期', '学历', '籍贯',
+                           '岗位', '部门', '项目', '电话', '证书', '类别', '工资',
+                           '状态', '状态详情', '入职日期', '离职日期'],
+                'need_group': False
+            },
+            'external': {
+                'filename': '安装公司外聘人员花名册.xlsx',
+                'sheet_title': '外聘人员名单',
+                'headers': ['序号', 'ID', '姓名', '性别', '身份证号', '出生日期', '学历', '籍贯',
+                           '岗位', '部门', '项目', '电话', '证书', '类别', '工资',
+                           '状态', '状态详情', '入职日期', '离职日期'],
+                'need_group': False
+            },
+            'salary': {
+                'filename': '安装公司工资数据.xlsx',
+                'sheet_title': '工资数据',
+                'headers': ['序号', '姓名', '工号', '部门', '基本工资', '岗位工资', '绩效工资',
+                           '津贴', '应发合计', '社保扣除', '公积金扣除', '个税', '实发工资'],
+                'need_group': False
+            },
+            'project': {
+                'filename': '安装公司按项目分组花名册.xlsx',
+                'sheet_title': '按项目分组名单',
+                'headers': ['序号', 'ID', '姓名', '性别', '岗位', '部门', '项目', '类别', '工资', '状态'],
+                'need_group': True,
+                'group_by': 'project'
+            },
+            'dept': {
+                'filename': '安装公司按部门分组花名册.xlsx',
+                'sheet_title': '按部门分组名单',
+                'headers': ['序号', 'ID', '姓名', '性别', '岗位', '部门', '项目', '类别', '工资', '状态'],
+                'need_group': True,
+                'group_by': 'dept'
+            }
+        }
+
+        config = TYPE_CONFIG[export_type]
+
+        # ---------- 5. 初始化 Excel ----------
         wb = Workbook()
         ws = wb.active
-        ws.title = '人员名单'
-        
-        # 表头
-        headers = ['序号', 'ID', '姓名', '性别', '身份证号', '出生日期', '学历', '籍贯',
-                   '岗位', '部门', '项目', '电话', '证书', '类别', '工资',
-                   '状态', '状态详情', '入职日期', '离职日期']
-        
-        thin = Side(style='thin')
+        ws.title = config['sheet_title']
+
+        # 样式定义
+        thin = Side(style='thin', color='B4B4B4')
         border_all = Border(left=thin, right=thin, top=thin, bottom=thin)
-        header_font = Font(name='宋体', size=11, bold=True)
-        data_font = Font(name='宋体', size=10)
-        center_align = Alignment(horizontal='center', vertical='center')
-        
+
+        header_font = Font(name='微软雅黑', size=11, bold=True, color='FFFFFF')
+        header_fill = PatternFill(start_color='4F46E5', end_color='4F46E5', fill_type='solid')
+
+        data_font = Font(name='微软雅黑', size=10)
+
+        group_font = Font(name='微软雅黑', size=10, bold=True, color='FFFFFF')
+        group_fill = PatternFill(start_color='059669', end_color='059669', fill_type='solid')
+
+        subtotal_font = Font(name='微软雅黑', size=10, bold=True, color='92400E')
+        subtotal_fill = PatternFill(start_color='FEF3C7', end_color='FEF3C7', fill_type='solid')
+
+        center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        left_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
+
+        # ---------- 6. 写入表头 ----------
+        headers = config['headers']
         for col, h in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col, value=h)
             cell.font = header_font
+            cell.fill = header_fill
             cell.alignment = center_align
             cell.border = border_all
-        
-        # 数据
-        for i, p in enumerate(people):
-            dept = p.get('dept', '') or ''
-            if not dept:
-                dept = get_dept(p)
-            
-            row_data = [
-                i + 1,
-                p['id'],
-                p['name'],
-                p.get('gender', ''),
-                p.get('id_card', ''),
-                p.get('birth', ''),
-                p.get('edu', ''),
-                p.get('hometown', ''),
-                p.get('position', ''),
-                dept,
-                p.get('project', ''),
-                p.get('phone', ''),
-                p.get('cert', ''),
-                p.get('category', ''),
-                float(p['salary']) if p.get('salary') else '',
-                p.get('status', ''),
-                p.get('status_detail', ''),
-                p.get('hire_date', ''),
-                p.get('leave_date', '') or ''
-            ]
-            
-            for col, val in enumerate(row_data, 1):
-                cell = ws.cell(row=i + 2, column=col, value=val)
-                cell.font = data_font
-                cell.alignment = center_align
-                cell.border = border_all
-        
-        # 自动列宽
+
+        ws.freeze_panes = 'A2'  # 冻结首行
+
+        # ---------- 7. 数据映射函数 ----------
+        def get_row_data(p, idx, export_type):
+            dept = p.get('dept', '') or get_dept(p)
+
+            if export_type in ('all', 'regular', 'external'):
+                return [
+                    idx + 1,
+                    p['id'],
+                    p['name'],
+                    p.get('gender', ''),
+                    p.get('id_card', ''),
+                    p.get('birth', ''),
+                    p.get('edu', ''),
+                    p.get('hometown', ''),
+                    p.get('position', ''),
+                    dept,
+                    p.get('project', ''),
+                    p.get('phone', ''),
+                    p.get('cert', ''),
+                    p.get('category', ''),
+                    float(p['salary']) if p.get('salary') else 0,
+                    p.get('status', ''),
+                    p.get('status_detail', ''),
+                    p.get('hire_date', ''),
+                    p.get('leave_date', '') or ''
+                ]
+
+            elif export_type == 'salary':
+                base = float(p.get('base_salary', 0) or 0) if p.get('base_salary') else 0
+                position_sal = float(p.get('position_salary', 0) or 0) if p.get('position_salary') else 0
+                performance = float(p.get('performance_salary', 0) or 0) if p.get('performance_salary') else 0
+                allowance = float(p.get('allowance', 0) or 0) if p.get('allowance') else 0
+                social = float(p.get('social_deduction', 0) or 0) if p.get('social_deduction') else 0
+                housing = float(p.get('housing_deduction', 0) or 0) if p.get('housing_deduction') else 0
+                tax = float(p.get('tax', 0) or 0) if p.get('tax') else 0
+
+                total = base + position_sal + performance + allowance
+                if total == 0 and p.get('salary'):
+                    total = float(p['salary'])
+
+                net = total - social - housing - tax
+
+                return [
+                    idx + 1,
+                    p['name'],
+                    p.get('id', ''),
+                    dept,
+                    base if base else '',
+                    position_sal if position_sal else '',
+                    performance if performance else '',
+                    allowance if allowance else '',
+                    total if total else '',
+                    social if social else '',
+                    housing if housing else '',
+                    tax if tax else '',
+                    net if net else ''
+                ]
+
+            elif export_type in ('project', 'dept'):
+                return [
+                    idx + 1,
+                    p['id'],
+                    p['name'],
+                    p.get('gender', ''),
+                    p.get('position', ''),
+                    dept,
+                    p.get('project', ''),
+                    p.get('category', ''),
+                    float(p['salary']) if p.get('salary') else 0,
+                    p.get('status', '')
+                ]
+
+        # ---------- 8. 写入数据 ----------
+        current_row = 2
+
+        if not config.get('need_group'):
+            for i, p in enumerate(people):
+                row_data = get_row_data(p, i, export_type)
+                for col, val in enumerate(row_data, 1):
+                    cell = ws.cell(row=current_row, column=col, value=val)
+                    cell.font = data_font
+                    cell.alignment = center_align if col <= 3 else left_align
+                    cell.border = border_all
+                current_row += 1
+
+        else:
+            group_key = config['group_by']
+            people_sorted = sorted(people, key=lambda x: x.get(group_key, '') or '未分组')
+
+            group_idx = 1
+            for group_name, group_members in groupby(people_sorted,
+                                                      key=lambda x: x.get(group_key, '') or '未分组'):
+                group_members = list(group_members)
+                group_count = len(group_members)
+                group_salary_sum = sum(
+                    float(p['salary']) if p.get('salary') else 0
+                    for p in group_members
+                )
+
+                # 分组标题行
+                ws.cell(row=current_row, column=1, value=f"【{group_name}】")
+                for col in range(1, len(headers) + 1):
+                    cell = ws.cell(row=current_row, column=col)
+                    cell.font = group_font
+                    cell.fill = group_fill
+                    cell.alignment = left_align
+                    cell.border = border_all
+                ws.merge_cells(start_row=current_row, start_column=1,
+                               end_row=current_row, end_column=len(headers))
+                current_row += 1
+
+                # 组成员数据
+                for p in group_members:
+                    row_data = get_row_data(p, group_idx - 1, export_type)
+                    row_data[0] = group_idx
+                    for col, val in enumerate(row_data, 1):
+                        cell = ws.cell(row=current_row, column=col, value=val)
+                        cell.font = data_font
+                        cell.alignment = center_align if col <= 3 else left_align
+                        cell.border = border_all
+                    current_row += 1
+                    group_idx += 1
+
+                # 小计行
+                subtotal_row = [''] * len(headers)
+                subtotal_row[0] = '小计'
+                subtotal_row[1] = f'{group_count}人'
+                salary_col = headers.index('工资') + 1 if '工资' in headers else 0
+                if salary_col:
+                    subtotal_row[salary_col - 1] = group_salary_sum
+
+                for col, val in enumerate(subtotal_row, 1):
+                    cell = ws.cell(row=current_row, column=col, value=val)
+                    cell.font = subtotal_font
+                    cell.fill = subtotal_fill
+                    cell.alignment = center_align
+                    cell.border = border_all
+                current_row += 1
+                group_idx = 1
+
+        # ---------- 9. 自动列宽（中文按2字符计算） ----------
         for col in range(1, len(headers) + 1):
             max_len = len(str(headers[col - 1]))
-            for row in range(2, len(people) + 2):
+            for row in range(1, current_row):
                 val = ws.cell(row=row, column=col).value
-                if val:
-                    max_len = max(max_len, len(str(val)))
-            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = min(max_len + 4, 30)
-        
-        # 保存到内存
+                if val is not None:
+                    val_str = str(val)
+                    display_len = sum(2 if ord(c) > 127 else 1 for c in val_str)
+                    max_len = max(max_len, display_len)
+            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = min(max_len + 3, 35)
+
+        ws.row_dimensions[1].height = 28
+        for row in range(2, current_row):
+            ws.row_dimensions[row].height = 22
+
+        # ---------- 10. 输出文件 ----------
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
-        
+
         return send_file(
             output,
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
-            download_name='安装公司人员名单.xlsx'
+            download_name=config['filename']
         )
+
     except Exception as e:
-        print(f"export error: {e}")
+        import traceback
+        print(f"[export_data] error: {e}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 # ============= 登录API =============
