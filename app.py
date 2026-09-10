@@ -1767,6 +1767,14 @@ def export_data():
                 else:
                     return '其他后台'
 
+            # 项目名标准化映射
+            project_name_map = {
+                '康定站项目': '康定站',
+                '红星路项目': '红星路',
+                '西南交大': '西南交大片区',
+                '重庆区域项目': '重庆区域',
+                '荣县EPC项目': '荣县EPC',
+            }
             # 分离后台和项目部
             backend_people = [p for p in people if (p.get('project') or '') in ['后台', '未分配']]
             project_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配']]
