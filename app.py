@@ -460,7 +460,7 @@ def update_person(person_id):
         
         fields = []
         values = []
-        for key in ['name','gender','id_card','birth','edu','hometown','position','dept','project','phone','cert','category','salary','status','status_detail','hire_date','leave_date','school','major','remark']:
+        for key in ['name','gender','id_card','birth','edu','hometown','position','dept','project','phone','cert','category','salary','status','status_detail','hire_date','leave_date','school','major','remark','is_external']:
             if key in data:
                 val = data[key]
                 # salary空字符串转None
