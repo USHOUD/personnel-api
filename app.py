@@ -1438,8 +1438,8 @@ def export_data():
         # ---------- 8. 写入数据 ----------
         current_row = 2
 
-        # huamingce类型：多sheet导出
-        if export_type == 'huamingce':
+        # huamingce/all类型：多sheet导出
+        if export_type in ('huamingce', 'all'):
             # 定义部门分组顺序
             backend_dept_order = [
                 '领导班子', '商务法务部', '供应链中心', '预算中心',
