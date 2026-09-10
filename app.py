@@ -420,14 +420,15 @@ def add_person():
                 salary = None
         
         cur.execute("""
-            INSERT INTO personnel (id, name, gender, id_card, birth, edu, hometown, position, dept, project, phone, cert, category, salary, hire_date)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            INSERT INTO personnel (id, name, gender, id_card, birth, edu, hometown, position, dept, project, phone, cert, category, salary, hire_date, school, major, remark)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (pid, data['name'], data.get('gender',''), data.get('id_card',''),
               data.get('birth',''), data.get('edu',''), data.get('hometown',''),
               data.get('position',''), data.get('dept',''),
               data.get('project','未分配'),
               data.get('phone',''), data.get('cert',''), cat, salary,
-              data.get('hire_date', '') or None))
+              data.get('hire_date', '') or None,
+              data.get('school',''), data.get('major',''), data.get('remark','')))
         
         conn.commit()
         cur.close()
@@ -453,7 +454,7 @@ def update_person(person_id):
         
         fields = []
         values = []
-        for key in ['name','gender','id_card','birth','edu','hometown','position','dept','project','phone','cert','category','salary','status','status_detail','hire_date','leave_date']:
+        for key in ['name','gender','id_card','birth','edu','hometown','position','dept','project','phone','cert','category','salary','status','status_detail','hire_date','leave_date','school','major','remark']:
             if key in data:
                 val = data[key]
                 # salary空字符串转None
@@ -1356,7 +1357,7 @@ def export_data():
             cell.alignment = center_align
             cell.border = border_all
 
-        ws.freeze_panes = 'A2'  # 冻结首行
+        # 不用freeze_panes，手机查看器可能不兼容
 
         # ---------- 7. 数据映射函数 ----------
         def get_row_data(p, idx, export_type):
