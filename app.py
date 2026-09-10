@@ -1532,14 +1532,36 @@ def export_data():
 
                 row_idx = 3
                 seq = 1
+                total_formal = 0
+                total_c1 = 0
+                total_c2 = 0
+                
                 for dept in group_order:
                     if dept not in groups:
                         continue
                     group = groups[dept]
 
+                    # 统计各类别人数
+                    formal_count = len([p for p in group if '正式' in str(p.get('category', ''))])
+                    c1_count = len([p for p in group if p.get('category') == 'C1'])
+                    c2_count = len([p for p in group if p.get('category') == 'C2'])
+                    total_formal += formal_count
+                    total_c1 += c1_count
+                    total_c2 += c2_count
+                    
+                    # 构建统计文字
+                    counts = []
+                    if formal_count > 0:
+                        counts.append(f'正式{formal_count}')
+                    if c1_count > 0:
+                        counts.append(f'C1:{c1_count}')
+                    if c2_count > 0:
+                        counts.append(f'C2:{c2_count}')
+                    count_str = '+'.join(counts) if counts else ''
+
                     # 部门标题行
                     ws.merge_cells(f'A{row_idx}:N{row_idx}')
-                    dept_cell = ws.cell(row=row_idx, column=1, value=f'{dept}（{len(group)}人）')
+                    dept_cell = ws.cell(row=row_idx, column=1, value=f'{dept}（{len(group)}人：{count_str}）')
                     dept_cell.font = Font(name='微软雅黑', size=10, bold=True)
                     dept_cell.fill = dept_fill
                     dept_cell.alignment = left_align
@@ -1564,6 +1586,28 @@ def export_data():
                                 cell.fill = leader_fill
                         seq += 1
                         row_idx += 1
+
+                # 总计行
+                total_count = total_formal + total_c1 + total_c2
+                total_counts = []
+                if total_formal > 0:
+                    total_counts.append(f'正式{total_formal}')
+                if total_c1 > 0:
+                    total_counts.append(f'C1:{total_c1}')
+                if total_c2 > 0:
+                    total_counts.append(f'C2:{total_c2}')
+                total_str = '+'.join(total_counts) if total_counts else ''
+                
+                ws.merge_cells(f'A{row_idx}:N{row_idx}')
+                total_cell = ws.cell(row=row_idx, column=1, value=f'合计（{total_count}人：{total_str}）')
+                total_cell.font = Font(name='微软雅黑', size=11, bold=True, color='FFFFFF')
+                total_cell.fill = PatternFill(start_color='4F46E5', end_color='4F46E5', fill_type='solid')
+                total_cell.alignment = left_align
+                total_cell.border = thin_border
+                for col in range(2, 15):
+                    ws.cell(row=row_idx, column=col).border = thin_border
+                    ws.cell(row=row_idx, column=col).fill = PatternFill(start_color='4F46E5', end_color='4F46E5', fill_type='solid')
+                row_idx += 1
 
                 # 设置列宽
                 widths = [6, 10, 6, 8, 20, 16, 22, 18, 12, 8, 30, 40, 15, 10]
