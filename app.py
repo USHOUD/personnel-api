@@ -1233,9 +1233,9 @@ def export_data():
 
         where_clause = ""
         if export_type == 'regular':
-            where_clause = "WHERE p.is_external = false"
+            where_clause = "WHERE p.category LIKE '%正式%'"
         elif export_type == 'external':
-            where_clause = "WHERE p.is_external = true"
+            where_clause = "WHERE p.category IN ('C1', 'C2')"
 
         if export_type == 'salary':
             # 工资导出：关联salary表
