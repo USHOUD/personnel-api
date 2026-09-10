@@ -1500,7 +1500,7 @@ def export_data():
 
             # 分离后台和项目部
             backend_people = [p for p in people if (p.get('project') or '') in ['后台', '未分配']]
-            project_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配']]
+            project_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配', '预算中心', '供应链中心', '其他']]
 
             # 后台按部门分组
             backend_groups = {}
@@ -1775,7 +1775,7 @@ def export_data():
             }
             # 分离后台和项目部
             backend_people = [p for p in people if (p.get('project') or '') in ['后台', '未分配']]
-            project_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配']]
+            project_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配', '预算中心', '供应链中心', '其他']]
 
             # 后台按部门分组
             backend_groups = {}
