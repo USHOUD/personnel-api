@@ -1439,7 +1439,7 @@ def export_data():
         current_row = 2
 
         # huamingce/all类型：多sheet导出
-        if export_type in ('huamingce', 'all'):
+        if export_type in ('huamingce', 'all', 'regular', 'external', 'project', 'dept'):
             # 定义部门分组顺序
             backend_dept_order = [
                 '领导班子', '商务法务部', '供应链中心', '预算中心',
@@ -1512,7 +1512,7 @@ def export_data():
                     project_groups[proj] = []
                 project_groups[proj].append(p)
 
-            # 写入总表
+            # 写入sheet函数
             def write_sheet(ws, title, groups, group_order, headers, styles):
                 header_font, header_fill, data_font, dept_fill, leader_fill, center_align, left_align, thin_border = styles
 
@@ -1543,7 +1543,7 @@ def export_data():
                     group = groups[dept]
 
                     # 统计各类别人数
-                    formal_count = len([p for p in group if '正式' in str(p.get('category', ''))])
+                    formal_count = len([p for p in group if p.get('category') == '正式职工'])
                     c1_count = len([p for p in group if p.get('category') == 'C1'])
                     c2_count = len([p for p in group if p.get('category') == 'C2'])
                     total_formal += formal_count
@@ -1640,28 +1640,9 @@ def export_data():
             def get_project_order(proj):
                 if proj in project_order:
                     return project_order.index(proj)
-                return 999  # 未知项目排最后
+                return 999
 
-            # 总表
-            all_groups = {}
-            for dept in backend_dept_order:
-                if dept in backend_groups:
-                    all_groups[dept] = backend_groups[dept]
-            for proj in sorted(project_groups.keys(), key=get_project_order):
-                all_groups[proj] = project_groups[proj]
-
-            write_sheet(ws, '总表', all_groups, list(all_groups.keys()), headers, styles)
-
-            # 后台sheet
-            ws_backend = wb.create_sheet()
-            write_sheet(ws_backend, '后台', backend_groups, backend_dept_order, headers, styles)
-
-            # 项目部sheet
-            ws_project = wb.create_sheet()
-            write_sheet(ws_project, '项目部', project_groups, sorted(project_groups.keys(), key=get_project_order), headers, styles)
-
-            # 正式职工表（只包含正式职工）
-            ws_formal = wb.create_sheet()
+            # 正式职工
             formal_groups = {}
             formal_order = []
             for dept in backend_dept_order:
@@ -1675,10 +1656,8 @@ def export_data():
                     if proj_formal:
                         formal_groups[proj] = proj_formal
                         formal_order.append(proj)
-            write_sheet(ws_formal, '正式职工表', formal_groups, formal_order, headers, styles)
 
-            # 外包人员表（只包含C1和C2，不包括"外包"）
-            ws_outsource = wb.create_sheet()
+            # 外包人员（C1+C2）
             outsource_groups = {}
             outsource_order = []
             for dept in backend_dept_order:
@@ -1692,7 +1671,112 @@ def export_data():
                     if proj_out:
                         outsource_groups[proj] = proj_out
                         outsource_order.append(proj)
-            write_sheet(ws_outsource, '外包人员表', outsource_groups, outsource_order, headers, styles)
+
+            # 总表（后台+项目部）
+            all_groups = {}
+            for dept in backend_dept_order:
+                if dept in backend_groups:
+                    all_groups[dept] = backend_groups[dept]
+            for proj in sorted(project_groups.keys(), key=get_project_order):
+                all_groups[proj] = project_groups[proj]
+
+            # 根据导出类型写入对应的sheet
+            if export_type in ('all', 'huamingce'):
+                # 全部：5个sheet
+                write_sheet(ws, '总表', all_groups, list(all_groups.keys()), headers, styles)
+                ws_backend = wb.create_sheet()
+                write_sheet(ws_backend, '后台', backend_groups, backend_dept_order, headers, styles)
+                ws_project = wb.create_sheet()
+                write_sheet(ws_project, '项目部', project_groups, sorted(project_groups.keys(), key=get_project_order), headers, styles)
+                ws_formal = wb.create_sheet()
+                write_sheet(ws_formal, '正式职工表', formal_groups, formal_order, headers, styles)
+                ws_outsource = wb.create_sheet()
+                write_sheet(ws_outsource, '外包人员表', outsource_groups, outsource_order, headers, styles)
+            elif export_type == 'regular':
+                # 正式职工：只导出正式职工表
+                write_sheet(ws, '正式职工表', formal_groups, formal_order, headers, styles)
+            elif export_type == 'external':
+                # 外聘人员：只导出外包人员表
+                write_sheet(ws, '外包人员表', outsource_groups, outsource_order, headers, styles)
+            elif export_type == 'project':
+                # 按项目分组：只导出项目部
+                write_sheet(ws, '项目部', project_groups, sorted(project_groups.keys(), key=get_project_order), headers, styles)
+            elif export_type == 'dept':
+                # 按部门分组：只导出后台
+                write_sheet(ws, '后台', backend_groups, backend_dept_order, headers, styles)
+
+        elif not config.get('need_group'):
+            # 定义部门分组顺序
+            backend_dept_order = [
+                '领导班子', '商务法务部', '供应链中心', '预算中心',
+                'BIM组', '设计组', '生产管理中心', '安全环保部',
+                '财务部', '综合办公室', '其他后台'
+            ]
+
+            # 分组函数
+            def is_leader(pos):
+                if not pos:
+                    return False
+                keywords = ['经理', '书记', '部长', '主任', '副经理', '副部长', '副主任', '负责人']
+                return any(k in str(pos) for k in keywords)
+
+            def get_backend_dept(p):
+                pos = str(p.get('position', '') or '')
+                name = p.get('name', '')
+                if name == '罗伟':
+                    return '设计组'
+                elif name in ['王丽娜', '王婉怡', '张宇', '张烨帆']:
+                    return '供应链中心'
+                elif name == '罗婷':
+                    return '财务部'
+                elif name == '程实':
+                    return '综合办公室'
+                elif name in ['陈晓涛', '董自明']:
+                    return '其他后台'
+                elif '经理' in pos and '副经理' not in pos and '正式' in str(p.get('category', '')):
+                    return '领导班子'
+                elif '书记' in pos:
+                    return '领导班子'
+                elif '副经理' in pos:
+                    return '领导班子'
+                elif '会计' in pos or '财务' in pos:
+                    return '财务部'
+                elif '商务' in pos or '成本' in pos or '结算' in pos:
+                    return '商务法务部'
+                elif 'BIM' in pos or 'bim' in pos:
+                    return 'BIM组'
+                elif '设计' in pos or '暖通' in pos or '电气' in pos:
+                    return '设计组'
+                elif '安全' in pos:
+                    return '安全环保部'
+                elif '调度' in pos or '生产' in pos or '策划' in pos:
+                    return '生产管理中心'
+                elif '文员' in pos or '综合' in pos or '司机' in pos:
+                    return '综合办公室'
+                elif '预算' in pos:
+                    return '预算中心'
+                else:
+                    return '其他后台'
+
+            # 分离后台和项目部
+            backend_people = [p for p in people if (p.get('project') or '') in ['后台', '未分配']]
+            project_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配']]
+
+            # 后台按部门分组
+            backend_groups = {}
+            for p in backend_people:
+                dept = get_backend_dept(p)
+                if dept not in backend_groups:
+                    backend_groups[dept] = []
+                backend_groups[dept].append(p)
+
+            # 项目部按项目分组
+            project_groups = {}
+            for p in project_people:
+                proj = p.get('project') or '未分配'
+                if proj not in project_groups:
+                    project_groups[proj] = []
+                project_groups[proj].append(p)
 
         elif not config.get('need_group'):
             for i, p in enumerate(people):
