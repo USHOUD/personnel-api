@@ -1,0 +1,2599 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""安装公司人员信息管理系统 - Supabase版"""
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from datetime import datetime, timedelta
+import hashlib
+from supabase_config import get_db, init_db
+from psycopg2.extras import RealDictCursor
+from upload_salary import upload_bp
+from evaluation import bp as evaluation_bp
+from kpi_output import bp as kpi_output_bp
+
+app = Flask(__name__)
+CORS(app, expose_headers=['X-User-Phone'])
+
+# 注册工资上传接口
+app.register_blueprint(upload_bp)
+
+# 注册考核打分接口
+app.register_blueprint(evaluation_bp)
+
+# 注册KPI+产值+综合考核接口
+app.register_blueprint(kpi_output_bp)
+
+# 初始化数据库
+init_db()
+
+# ============= 权限管理 =============
+
+def get_current_user():
+    """从请求头获取当前用户信息"""
+    phone = request.headers.get('X-User-Phone', '')
+    if not phone:
+        return None
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT phone, name, is_admin FROM users WHERE phone=%s", (phone,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+    return user
+
+# ============= 拼音搜索 =============
+
+def get_py_initials(name):
+    """获取姓名拼音首字母（无音标，纯小写）"""
+    if not name:
+        return ''
+    try:
+        from pypinyin import lazy_pinyin, Style
+        return ''.join([p[0] for p in lazy_pinyin(str(name), style=Style.FIRST_LETTER)]).lower()
+    except Exception:
+        return ''
+
+def get_py_full(name):
+    """获取姓名全拼（小写）"""
+    if not name:
+        return ''
+    try:
+        from pypinyin import lazy_pinyin
+        return ''.join(lazy_pinyin(str(name))).lower()
+    except Exception:
+        return ''
+
+def match_name_pinyin(name, search_key):
+    """检查姓名是否匹配拼音搜索
+
+    - '龙'（中文单字） → 匹配名字含'龙' **或姓首字母是l** 的人（不匹配名字其他字的首字母）
+    - '陈'（中文单字） → 同上
+    - 'lcq' → 拼音首字母前缀匹配
+    - 'long' → 全拼含 long 或 initials 前缀匹配
+    - '龙长' → 名字含'龙长' 或 initials 前 N 位
+    """
+    if not name or not search_key:
+        return False
+    name_lower = name.lower()
+    search_lower = search_key.lower()
+    # 1. 原名子串匹配
+    if search_key in name or search_lower in name_lower:
+        return True
+    py_init = get_py_initials(name)
+    py_full = get_py_full(name)
+    # 2. 中文单字：只匹配姓氏（首字母或全拼）
+    if len(search_key) == 1 and not search_key.isascii():
+        # 搜索字的拼音首字母
+        search_char_initial = get_first_char_pinyin(search_key)
+        # 搜索字的全拼
+        search_char_full = get_first_char_pinyin(search_key)  # 同 get_first_char_pinyin
+        surname_init = py_init[0] if py_init else ''
+        # 姓氏首字母 == 搜索字拼音首字母
+        if surname_init == search_char_initial:
+            return True
+        # 姓氏全拼 == 搜索字拼音（处理单字姓）
+        surname_full = get_first_char_pinyin(name[0]) if name else ''
+        if surname_full == search_char_full:
+            return True
+        # 多字姓特殊情况：姓氏全拼的前N字 == 搜索字拼音
+        if py_full and search_char_full and py_full.startswith(search_char_full):
+            # 但要确保不会因为"龙"而匹配所有姓以"long"开头的人（不合理）
+            # 所以只接受单字姓氏或双字姓氏的第一字匹配
+            if len(name) >= 2:
+                # 比如搜"龙"，匹配"龙"姓的人，或"欧阳"姓（ouyang起始）
+                return False
+        return False
+    # 3. 拼音字母：匹配首字母前缀或全拼子串
+    if search_key.isascii():
+        # 拼音首字母前缀匹配（不是子串包含）
+        if search_lower and py_init.startswith(search_lower):
+            return True
+        # 全拼子串匹配（支持中间字匹配，如"long"匹配"longzhangqiu"）
+        if search_lower in py_full:
+            return True
+    else:
+        # 中文（多字）：匹配名字含此串或 initials 前缀
+        if search_lower == py_init[:len(search_lower)]:
+            return True
+    return False
+
+def get_first_char_pinyin(char):
+    """获取单个汉字的第一个拼音（处理多音字）"""
+    if not char:
+        return ''
+    try:
+        from pypinyin import lazy_pinyin
+        return lazy_pinyin(char)[0].lower()
+    except Exception:
+        return ''
+
+def mask_person_data(p, is_self=False, is_admin=False):
+    """根据权限过滤人员数据"""
+    dept = p.get('dept', '') or ''
+    if not dept:
+        dept = get_dept(p)
+
+    base_fields = {
+        'id': p['id'],
+        'name': p['name'],
+        'position': p.get('position', '') or '',
+        'dept': dept,
+        'project': p.get('project', '') or '未分配',
+        'phone': p.get('phone', '') or '',
+        'category': p.get('category', ''),
+        'status': p.get('status', '') or '在岗',
+        'is_external': bool(p.get('is_external', False)),
+        'edu': p.get('edu', '') or '',
+        'school': p.get('school', '') or '',
+        'major': p.get('major', '') or ''
+    }
+
+    # 管理员或本人看完整信息
+    if is_admin or is_self:
+        return {
+            **base_fields,
+            'gender': p.get('gender', '') or '',
+            'id_card': p.get('id_card', '') or '',
+            'birth': p.get('birth', '') or '',
+            'edu': p.get('edu', '') or '',
+            'hometown': p.get('hometown', '') or '',
+            'cert': p.get('cert', '') or '',
+            'salary': float(p['salary']) if p.get('salary') else None,
+            'status_detail': p.get('status_detail', '') or '',
+            'hire_date': p.get('hire_date', '') or '',
+            'leave_date': p.get('leave_date', '') or '',
+            'school': p.get('school', '') or '',
+            'major': p.get('major', '') or '',
+            'remark': p.get('remark', '') or ''
+        }
+
+    # 普通用户看别人：基础字段
+    return {
+        **base_fields,
+        'gender': p.get('gender', '') or ''
+    }
+
+# ============= 人员相关API =============
+
+def get_dept(person):
+    """根据职位和项目自动推断部门"""
+    position = (person.get('position', '') or '').lower()
+    project = person.get('project', '') or ''
+    stored_dept = (person.get('dept', '') or '').strip()
+
+    # 优先用数据库里已存的部门（手动维护的优先于自动推断）
+    if stored_dept and stored_dept not in ('质量技术部',) or stored_dept in ('BIM组', '设计组'):
+        return stored_dept
+
+    # 领导班子
+    if any(k in position for k in ['经理', '书记']):
+        return '领导班子'
+
+    # 后台人员
+    if project == '后台':
+        if any(k in position for k in ['bim']):
+            return 'BIM组'
+        elif any(k in position for k in ['设计']):
+            return '设计组'
+        elif any(k in position for k in ['策划', '调度']):
+            return '生产管理中心'
+        elif any(k in position for k in ['商务', '预算', '造价', '结算', '成本', '核算']):
+            return '商务法务部'
+        elif any(k in position for k in ['财务', '会计']):
+            return '财务部'
+        elif any(k in position for k in ['安全']):
+            return '安全环保部'
+        else:
+            return '综合办公室'
+
+    # 项目人员：按专业归口
+    if any(k in position for k in ['bim']):
+        return 'BIM组'
+    elif any(k in position for k in ['设计']):
+        return '设计组'
+    elif any(k in position for k in ['商务', '预算', '造价', '结算', '成本', '核算']):
+        return '商务法务部'
+    elif any(k in position for k in ['安全']):
+        return '安全环保部'
+    else:
+        return '工程技术部'
+
+def auto_restore_on_duty():
+    """自动恢复在岗：检查出差/休假是否过期，过期则恢复为在岗"""
+    try:
+        import re
+        # 北京时间 = UTC+8
+        now_bj = datetime.utcnow() + timedelta(hours=8)
+        today_str = now_bj.strftime('%Y-%m-%d')
+
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, status, status_detail FROM personnel WHERE status IN ('出差','休假')")
+        rows = cur.fetchall()
+
+        restored = []
+        for row in rows:
+            detail = row.get('status_detail', '') or ''
+            # 提取日期：匹配 至YYYY-MM-DD 或 (至YYYY-MM-DD)
+            m = re.search(r'至(\d{4}-\d{2}-\d{2})', detail)
+            if m:
+                end_date = m.group(1)
+                if today_str > end_date:
+                    cur.execute("UPDATE personnel SET status='在岗', status_detail='', updated_at=NOW() WHERE id=%s", (row['id'],))
+                    restored.append(row['id'])
+
+        if restored:
+            conn.commit()
+        cur.close()
+        conn.close()
+        return restored
+    except Exception as e:
+        print(f"auto_restore_on_duty error: {e}")
+        return []
+
+@app.route('/api/personnel')
+def get_personnel():
+    """获取人员列表
+
+    参数：
+    - category: all/formal/outsourced/C1/C2
+    - search: 搜索关键字
+    - include_external: 1=包含外协系统人员（王丽娜/王婉怡/李鑫等，is_external=true）
+                     默认 0=不包含（花名册页面）
+    """
+    # 自动恢复过期的出差/休假人员
+    auto_restore_on_duty()
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    category = request.args.get('category', 'all')
+    search = request.args.get('search', '').strip()
+    include_external = request.args.get('include_external', '0') == '1'
+
+    # 默认过滤掉外协系统人员（花名册页面不显示）和已离职人员
+    where_clauses = []
+    params = []
+
+    if category == 'formal':
+        where_clauses.append("category='正式职工'")
+    elif category == 'outsourced':
+        where_clauses.append("category IN ('C1','C2')")
+    elif category == 'C1':
+        where_clauses.append("category='C1'")
+    elif category == 'C2':
+        where_clauses.append("category='C2'")
+
+    if not include_external:
+        where_clauses.append("(is_external IS NULL OR is_external = FALSE)")
+
+    # 默认过滤掉已离职人员
+    if not request.args.get('include_left', '0') == '1':
+        where_clauses.append("(leave_date IS NULL OR leave_date = '')")
+
+    sql = "SELECT * FROM personnel"
+    if where_clauses:
+        sql += " WHERE " + " AND ".join(where_clauses)
+    cur.execute(sql)
+
+    people = cur.fetchall()
+
+    if search:
+        key = search.lower()
+        people = [p for p in people if (
+            key in (p['name'] or '').lower()
+            or key in (p['position'] or '').lower()
+            or key in (p['project'] or '').lower()
+            or key in (p['dept'] or '').lower()
+            or match_name_pinyin(p['name'], search)  # 拼音/姓氏智能匹配
+        )]
+    
+    # 排序逻辑
+    def sort_key(p):
+        # 1. 固定人员优先
+        fixed_order = {'邱方恒': 0, '廖志成': 1, '吕亮': 2, '李强': 3}
+        fixed = fixed_order.get(p['name'], 99)
+        
+        # 2. 人员类别
+        cat_order = {'正式职工': 0, 'C1': 1, 'C2': 2}
+        cat = cat_order.get(p.get('category', ''), 3)
+        
+        # 3. 项目优先级
+        project = p.get('project', '') or ''
+        if project == '后台':
+            proj = 0
+        elif project and project != '其他':
+            proj = 1
+        else:
+            proj = 2
+        
+        # 4. 职务级别
+        position = (p.get('position', '') or '').lower()
+        if any(k in position for k in ['经理', '书记']):
+            pos = 0
+        elif any(k in position for k in ['部长', '主管', '副部长']):
+            pos = 1
+        else:
+            pos = 2
+        
+        return (fixed, cat, proj, pos, p.get('name', ''))
+    
+    people.sort(key=sort_key)
+    
+    # 获取当前用户权限
+    current_user = get_current_user()
+    is_admin = current_user['is_admin'] if current_user else False
+    current_user_phone = current_user['phone'] if current_user else ''
+    
+    # 找到当前用户的personnel_id
+    current_person_id = None
+    if current_user_phone:
+        conn2 = get_db()
+        cur2 = conn2.cursor()
+        cur2.execute("SELECT id FROM personnel WHERE phone=%s", (current_user_phone,))
+        row = cur2.fetchone()
+        if row:
+            current_person_id = row['id']
+        cur2.close()
+        conn2.close()
+    
+    # 转换为JSON格式
+    result = []
+    for p in people:
+        is_self = (p['id'] == current_person_id)
+        result.append(mask_person_data(p, is_self=is_self, is_admin=is_admin))
+    
+    cur.close()
+    conn.close()
+    return jsonify(result)
+
+@app.route('/api/personnel/<person_id>')
+def get_person(person_id):
+    """获取单个人员详情"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM personnel WHERE id=%s", (person_id,))
+    p = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    if not p:
+        return jsonify({'error': '未找到该人员'}), 404
+    
+    # 权限检查
+    current_user = get_current_user()
+    is_admin = current_user['is_admin'] if current_user else False
+    current_user_phone = current_user['phone'] if current_user else ''
+    
+    is_self = (p.get('phone', '') == current_user_phone)
+    
+    return jsonify(mask_person_data(p, is_self=is_self, is_admin=is_admin))
+
+@app.route('/api/personnel', methods=['POST'])
+def add_person():
+    """新增人员"""
+    data = request.json
+    if not data.get('name'):
+        return jsonify({'error': '姓名不能为空'}), 400
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # 生成ID（找最大编号+1，避免重复）
+        cat = data.get('category', '正式职工')
+        if cat == '正式职工':
+            cur.execute("SELECT id FROM personnel WHERE id LIKE 'F%' ORDER BY CAST(SUBSTRING(id FROM 2) AS INTEGER) DESC LIMIT 1")
+        else:
+            cur.execute("SELECT id FROM personnel WHERE id LIKE 'O%' ORDER BY CAST(SUBSTRING(id FROM 2) AS INTEGER) DESC LIMIT 1")
+        
+        row = cur.fetchone()
+        if row and row['id']:
+            max_num = int(row['id'][1:])
+            pid = f"{'F' if cat == '正式职工' else 'O'}{max_num + 1}"
+        else:
+            pid = f"{'F' if cat == '正式职工' else 'O'}1"
+        
+        # salary转数字，空字符串转None
+        salary = data.get('salary')
+        if salary == '' or salary is None:
+            salary = None
+        else:
+            try:
+                salary = float(salary)
+            except:
+                salary = None
+        
+        cur.execute("""
+            INSERT INTO personnel (id, name, gender, id_card, birth, edu, hometown, position, dept, project, phone, cert, category, salary, hire_date, school, major, remark)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (pid, data['name'], data.get('gender',''), data.get('id_card',''),
+              data.get('birth',''), data.get('edu',''), data.get('hometown',''),
+              data.get('position',''), data.get('dept',''),
+              data.get('project','未分配'),
+              data.get('phone',''), data.get('cert',''), cat, salary,
+              data.get('hire_date', '') or None,
+              data.get('school',''), data.get('major',''), data.get('remark','')))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({'success': True, 'person': {'id': pid, **data}})
+    except Exception as e:
+        print(f"add_person error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/personnel/<person_id>', methods=['PUT'])
+def update_person(person_id):
+    """更新人员信息"""
+    data = request.json
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT id FROM personnel WHERE id=%s", (person_id,))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return jsonify({'error': '未找到该人员'}), 404
+        
+        fields = []
+        values = []
+        for key in ['name','gender','id_card','birth','edu','hometown','position','dept','project','phone','cert','category','salary','status','status_detail','hire_date','leave_date','school','major','remark','is_external']:
+            if key in data:
+                val = data[key]
+                # salary空字符串转None
+                if key == 'salary' and (val == '' or val is None):
+                    val = None
+                fields.append(f"{key}=%s")
+                values.append(val)
+        
+        if fields:
+            fields.append("updated_at=NOW()")
+            values.append(person_id)
+            cur.execute(f"UPDATE personnel SET {','.join(fields)} WHERE id=%s", values)
+            conn.commit()
+        
+        cur.close()
+        conn.close()
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"update_person error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/personnel/<person_id>', methods=['DELETE'])
+def delete_person(person_id):
+    """删除人员"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM personnel WHERE id=%s", (person_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+# ============= 状态管理API =============
+
+@app.route('/api/personnel/<person_id>/status', methods=['PUT'])
+def update_status(person_id):
+    """更新人员状态"""
+    data = request.json
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE personnel SET status=%s, status_detail=%s, updated_at=NOW() WHERE id=%s",
+                (data.get('status','在岗'), data.get('detail',''), person_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/personnel/<person_id>/return', methods=['PUT'])
+def person_return(person_id):
+    """归队/销假"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE personnel SET status='在岗', status_detail='', updated_at=NOW() WHERE id=%s", (person_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/personnel/<person_id>/resign', methods=['PUT'])
+def person_resign(person_id):
+    """离职：设置leave_date和状态为已离职"""
+    try:
+        data = request.json or {}
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("SELECT id FROM personnel WHERE id=%s", (person_id,))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return jsonify({'error': '未找到该人员'}), 404
+
+        leave_date = data.get('leave_date', '') or datetime.utcnow().strftime('%Y-%m-%d')
+        cur.execute("UPDATE personnel SET status='已离职', leave_date=%s, status_detail='', updated_at=NOW() WHERE id=%s",
+                    (leave_date, person_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"person_resign error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/personnel/<person_id>/hire', methods=['PUT'])
+def person_hire(person_id):
+    """入职/重新入职：设置hire_date和状态为在岗"""
+    try:
+        data = request.json or {}
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("SELECT id FROM personnel WHERE id=%s", (person_id,))
+        if not cur.fetchone():
+            cur.close(); conn.close()
+            return jsonify({'error': '未找到该人员'}), 404
+
+        hire_date = data.get('hire_date', '') or datetime.utcnow().strftime('%Y-%m-%d')
+        cur.execute("UPDATE personnel SET status='在岗', hire_date=%s, leave_date=NULL, status_detail='', updated_at=NOW() WHERE id=%s",
+                    (hire_date, person_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"person_hire error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/auto-restore', methods=['POST'])
+def auto_restore_api():
+    """手动触发自动恢复在岗（也供前端定期调用）"""
+    restored = auto_restore_on_duty()
+    return jsonify({'success': True, 'restored': restored, 'count': len(restored)})
+
+# ============= 假期余额API =============
+
+@app.route('/api/leave-balance/<person_id>')
+def get_leave_balance(person_id):
+    """获取人员假期余额"""
+    try:
+        import re
+        from datetime import datetime as dt
+        
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("SELECT * FROM personnel WHERE id=%s", (person_id,))
+        person = cur.fetchone()
+        if not person:
+            cur.close(); conn.close()
+            return jsonify({'error': '未找到该人员'}), 404
+        
+        # 权限检查：仅本人或管理员可查看假期余额
+        current_user = get_current_user()
+        is_admin = current_user and current_user.get('is_admin', False)
+        is_self = current_user and current_user.get('phone') == person.get('phone')
+        if not is_admin and not is_self:
+            cur.close(); conn.close()
+            return jsonify({'error': '无权限查看'}), 403
+        
+        category = person.get('category', '')
+        hire_date = person.get('hire_date', '') or ''
+        birth = person.get('birth', '') or ''
+        
+        now = dt.now()
+        current_year = now.year
+        
+        # 计算工龄（正式职工用参加工作时间，外包用入职时间）
+        work_years = 0
+        if category == '正式职工':
+            # 正式职工从出生+22岁估算，或从hire_date
+            if hire_date:
+                try:
+                    hd = dt.strptime(hire_date[:10], '%Y-%m-%d')
+                    work_years = (now - hd).days / 365.25
+                except:
+                    work_years = 0
+        else:
+            # 外包人员从hire_date算
+            if hire_date:
+                try:
+                    hd = dt.strptime(hire_date[:10], '%Y-%m-%d')
+                    work_years = (now - hd).days / 365.25
+                except:
+                    work_years = 0
+        
+        # 年休假天数
+        annual_leave = 0
+        if category == '正式职工':
+            if work_years >= 20:
+                annual_leave = 15
+            elif work_years >= 10:
+                annual_leave = 10
+            elif work_years >= 1:
+                annual_leave = 5
+        else:
+            # 外包：满1年后5天
+            if work_years >= 1:
+                annual_leave = 5
+        
+        # 探亲假（正式职工，工作满1年）
+        family_leave = 0
+        if category == '正式职工' and work_years >= 1:
+            family_leave = 30  # 默认探配偶30天
+        
+        # 统计当年已使用假期
+        cur.execute("""
+            SELECT reason, start_date, end_date FROM leave_records 
+            WHERE person_id=%s AND status='已通过' 
+            AND start_date >= %s AND start_date < %s
+        """, (person_id, f'{current_year}-01-01', f'{current_year + 1}-01-01'))
+        used_records = cur.fetchall()
+        
+        used_annual = 0
+        used_family = 0
+        used_other = 0
+        used_details = []
+        
+        for r in used_records:
+            try:
+                start = dt.strptime(r['start_date'], '%Y-%m-%d')
+                end = dt.strptime(r['end_date'], '%Y-%m-%d')
+                days = (end - start).days + 1
+            except:
+                days = 0
+            
+            reason = r.get('reason', '') or ''
+            used_details.append({'reason': reason, 'days': days, 'start': r['start_date'], 'end': r['end_date']})
+            
+            if '年休' in reason:
+                used_annual += days
+            elif '探亲' in reason:
+                used_family += days
+            else:
+                used_other += days
+        
+        cur.close()
+        conn.close()
+        
+        # 从考勤表统计（更准确）
+        # 先用leave_records的统计
+        
+        result = {
+            'person_id': person_id,
+            'name': person['name'],
+            'category': category,
+            'hire_date': hire_date,
+            'work_years': round(work_years, 1),
+            'leave_types': []
+        }
+        
+        if annual_leave > 0:
+            result['leave_types'].append({
+                'type': '年休假',
+                'total': annual_leave,
+                'used': used_annual,
+                'remaining': max(0, annual_leave - used_annual)
+            })
+        
+        if category == '正式职工' and family_leave > 0:
+            family_used_flag = 1 if used_family > 0 else 0
+            result['leave_types'].append({
+                'type': '探亲假（探配偶）',
+                'total': f'{family_leave}天/年（一次）',
+                'used': f'已休{used_family}天' if used_family > 0 else '未休',
+                'remaining': 0 if used_family > 0 else family_leave
+            })
+        
+        # 其他假期类型（不扣额度）
+        if used_other > 0:
+            result['leave_types'].append({
+                'type': '其他假（病/陪产/事假等）',
+                'total': '-',
+                'used': used_other,
+                'remaining': '-'
+            })
+        
+        result['used_details'] = used_details
+        
+        return jsonify(result)
+    except Exception as e:
+        print(f"leave_balance error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/leave-balance')
+def get_all_leave_balance():
+    """获取所有人员假期余额"""
+    try:
+        from datetime import datetime as dt
+        
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("SELECT * FROM personnel WHERE status != '已离职' ORDER BY category, name")
+        people = cur.fetchall()
+        
+        now = dt.now()
+        current_year = now.year
+        
+        # 获取当年所有已审批休假
+        cur.execute("""
+            SELECT person_id, reason, start_date, end_date FROM leave_records 
+            WHERE status='已通过' AND start_date >= %s AND start_date < %s
+        """, (f'{current_year}-01-01', f'{current_year + 1}-01-01'))
+        all_used = cur.fetchall()
+        
+        # 按人员分组
+        used_map = {}
+        for r in all_used:
+            pid = r['person_id']
+            if pid not in used_map:
+                used_map[pid] = []
+            used_map[pid].append(r)
+        
+        results = []
+        for p in people:
+            category = p.get('category', '')
+            hire_date = p.get('hire_date', '') or ''
+            
+            work_years = 0
+            if hire_date:
+                try:
+                    hd = dt.strptime(hire_date[:10], '%Y-%m-%d')
+                    work_years = (now - hd).days / 365.25
+                except:
+                    pass
+            
+            annual_leave = 0
+            if category == '正式职工':
+                if work_years >= 20: annual_leave = 15
+                elif work_years >= 10: annual_leave = 10
+                elif work_years >= 1: annual_leave = 5
+            else:
+                if work_years >= 1: annual_leave = 5
+            
+            used_annual = 0
+            used_family = 0
+            for r in used_map.get(p['id'], []):
+                try:
+                    s = dt.strptime(r['start_date'], '%Y-%m-%d')
+                    e = dt.strptime(r['end_date'], '%Y-%m-%d')
+                    days = (e - s).days + 1
+                except:
+                    days = 0
+                reason = r.get('reason', '') or ''
+                if '年休' in reason: used_annual += days
+                elif '探亲' in reason: used_family += days
+            
+            entry = {
+                'id': p['id'],
+                'name': p['name'],
+                'category': category,
+                'work_years': round(work_years, 1),
+                'annual_total': annual_leave,
+                'annual_used': used_annual,
+                'annual_remaining': max(0, annual_leave - used_annual),
+            }
+            
+            if category == '正式职工':
+                entry['family_total'] = 30 if work_years >= 1 else 0
+                entry['family_used'] = used_family
+                entry['family_remaining'] = 0 if used_family > 0 else entry['family_total']
+            
+            results.append(entry)
+        
+        cur.close()
+        conn.close()
+        return jsonify(results)
+    except Exception as e:
+        print(f"all_leave_balance error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ============= 调动记录API =============
+
+@app.route('/api/transfers')
+def get_transfers():
+    """获取调动记录"""
+    conn = get_db()
+    cur = conn.cursor()
+    person_id = request.args.get('person_id')
+    
+    if person_id:
+        cur.execute("SELECT * FROM transfers WHERE person_id=%s ORDER BY created_at DESC", (person_id,))
+    else:
+        cur.execute("SELECT * FROM transfers ORDER BY created_at DESC")
+    
+    records = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(r) for r in records])
+
+@app.route('/api/transfers', methods=['POST'])
+def add_transfer():
+    """新增调动记录"""
+    data = request.json
+    if not data.get('person_id') or not data.get('to_project'):
+        return jsonify({'error': '信息不完整'}), 400
+    
+    conn = get_db()
+    cur = conn.cursor()
+    
+    # 获取原项目
+    cur.execute("SELECT project FROM personnel WHERE id=%s", (data['person_id'],))
+    person = cur.fetchone()
+    from_project = person['project'] if person else ''
+    
+    # 生成ID
+    cur.execute("SELECT COUNT(*) FROM transfers")
+    tid = f"T{cur.fetchone()['count'] + 1}"
+    
+    cur.execute("""
+        INSERT INTO transfers (id, person_id, person_name, from_project, to_project, transfer_date, notes, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (tid, data['person_id'], data.get('person_name',''), from_project,
+          data['to_project'], data.get('transfer_date',''), data.get('notes',''),
+          datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    # 更新人员项目
+    cur.execute("UPDATE personnel SET project=%s, updated_at=NOW() WHERE id=%s",
+                (data['to_project'], data['person_id']))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True, 'transfer': {'id': tid, **data}})
+
+@app.route('/api/personnel/<person_id>/timeline')
+def get_timeline(person_id):
+    """获取项目时间线"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT * FROM transfers WHERE person_id=%s ORDER BY transfer_date", (person_id,))
+    transfers = cur.fetchall()
+    
+    cur.execute("SELECT project FROM personnel WHERE id=%s", (person_id,))
+    person = cur.fetchone()
+    current_project = person['project'] if person else '未分配'
+    
+    timeline = []
+    if not transfers:
+        timeline.append({'project': current_project, 'start_date': '至今', 'end_date': '至今', 'months': 12})
+    
+    cur.close()
+    conn.close()
+    return jsonify({
+        'person_id': person_id,
+        'current_project': current_project,
+        'timeline': timeline,
+        'transfers': [dict(t) for t in transfers]
+    })
+
+# ============= 休假申请API =============
+
+@app.route('/api/leave')
+def get_leave():
+    """获取休假申请"""
+    conn = get_db()
+    cur = conn.cursor()
+    person_id = request.args.get('person_id')
+    
+    if person_id:
+        cur.execute("SELECT * FROM leave_records WHERE person_id=%s ORDER BY created_at DESC", (person_id,))
+    else:
+        cur.execute("SELECT * FROM leave_records ORDER BY created_at DESC")
+    
+    records = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(r) for r in records])
+
+@app.route('/api/leave', methods=['POST'])
+def add_leave():
+    """新增休假申请"""
+    data = request.json
+    if not data.get('person_id') or not data.get('start_date') or not data.get('end_date'):
+        return jsonify({'error': '信息不完整'}), 400
+    
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT COUNT(*) FROM leave_records")
+    lid = f"L{cur.fetchone()['count'] + 1}"
+    
+    cur.execute("""
+        INSERT INTO leave_records (id, person_id, person_name, start_date, end_date, reason, status, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (lid, data['person_id'], data.get('person_name',''),
+          data['start_date'], data['end_date'], data.get('reason',''),
+          '待审批', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True, 'record': {'id': lid, **data}})
+
+@app.route('/api/leave/<record_id>/approve', methods=['PUT'])
+def approve_leave(record_id):
+    """审批休假"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("UPDATE leave_records SET status='已通过' WHERE id=%s RETURNING person_id, end_date", (record_id,))
+    record = cur.fetchone()
+    
+    if record:
+        cur.execute("UPDATE personnel SET status='休假', status_detail=%s, updated_at=NOW() WHERE id=%s",
+                    (f"休假至{record['end_date']}", record['person_id']))
+        conn.commit()
+    
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/leave/<record_id>/reject', methods=['PUT'])
+def reject_leave(record_id):
+    """驳回休假"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE leave_records SET status='已驳回' WHERE id=%s", (record_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+# ============= 出差单API =============
+
+@app.route('/api/trip')
+def get_trips():
+    """获取出差单"""
+    conn = get_db()
+    cur = conn.cursor()
+    person_id = request.args.get('person_id')
+    
+    if person_id:
+        cur.execute("SELECT * FROM trip_records WHERE person_id=%s ORDER BY created_at DESC", (person_id,))
+    else:
+        cur.execute("SELECT * FROM trip_records ORDER BY created_at DESC")
+    
+    records = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(r) for r in records])
+
+@app.route('/api/trip', methods=['POST'])
+def add_trip():
+    """新增出差单"""
+    data = request.json
+    if not data.get('person_id') or not data.get('destination'):
+        return jsonify({'error': '信息不完整'}), 400
+    
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT COUNT(*) FROM trip_records")
+    bid = f"B{cur.fetchone()['count'] + 1}"
+    
+    cur.execute("""
+        INSERT INTO trip_records (id, person_id, person_name, destination, start_date, end_date, reason, status, created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (bid, data['person_id'], data.get('person_name',''),
+          data['destination'], data.get('start_date',''), data.get('end_date',''),
+          data.get('reason',''), '待审批', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True, 'record': {'id': bid, **data}})
+
+@app.route('/api/trip/<record_id>/approve', methods=['PUT'])
+def approve_trip(record_id):
+    """审批出差"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("UPDATE trip_records SET status='已通过' WHERE id=%s RETURNING person_id, destination", (record_id,))
+    record = cur.fetchone()
+    
+    if record:
+        # 获取出差结束日期用于自动恢复
+        cur.execute("SELECT end_date FROM trip_records WHERE id=%s", (record_id,))
+        trip = cur.fetchone()
+        end_str = ''
+        if trip and trip.get('end_date'):
+            end_str = f"(至{trip['end_date']})"
+        cur.execute("UPDATE personnel SET status='出差', status_detail=%s, updated_at=NOW() WHERE id=%s",
+                    (f"出差-{record['destination']}{end_str}", record['person_id']))
+        conn.commit()
+    
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/trip/<record_id>/reject', methods=['PUT'])
+def reject_trip(record_id):
+    """驳回出差"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE trip_records SET status='已驳回' WHERE id=%s", (record_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+# ============= 统计API =============
+
+@app.route('/api/statistics')
+def get_statistics():
+    """获取统计数据（仅统计安装公司人员，不含外协系统人员）"""
+    conn = get_db()
+    cur = conn.cursor()
+
+    # 基础过滤：不含外协系统人员（与花名册保持一致）
+    base_where = "(leave_date IS NULL OR leave_date = '') AND (is_external IS NULL OR is_external = FALSE)"
+
+    cur.execute(f"SELECT COUNT(*) as total FROM personnel WHERE {base_where}")
+    total = cur.fetchone()['total']
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND category='正式职工'")
+    formal = cur.fetchone()['c']
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND category='C1'")
+    c1 = cur.fetchone()['c']
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND category='C2'")
+    c2 = cur.fetchone()['c']
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND gender='男'")
+    male = cur.fetchone()['c']
+
+    cur.execute(f"SELECT COUNT(*) as c FROM personnel WHERE {base_where} AND gender='女'")
+    female = cur.fetchone()['c']
+    
+    # 学历统计
+    def map_edu(edu):
+        if not edu: return '未知'
+        if any(k in edu for k in ['硕士','研究生']): return '硕士研究生'
+        if any(k in edu for k in ['本科','大学']): return '本科'
+        if any(k in edu for k in ['专科','大专']): return '专科'
+        if any(k in edu for k in ['中专','初中','高中']): return '高中及以下'
+        return '未知'
+    
+    cur.execute(f"SELECT edu FROM personnel WHERE {base_where}")
+    edu_stats = {}
+    for row in cur.fetchall():
+        cat = map_edu(row['edu'])
+        edu_stats[cat] = edu_stats.get(cat, 0) + 1
+
+    # 项目统计
+    cur.execute(f"SELECT project, COUNT(*) as c FROM personnel WHERE {base_where} AND category='正式职工' GROUP BY project")
+    dept_stats = {row['project']: row['c'] for row in cur.fetchall()}
+
+    # 证书统计
+    cur.execute(f"SELECT name, cert FROM personnel WHERE {base_where}")
+    cert_stats = {
+        '一建': {'count': 0, 'persons': []},
+        '一造': {'count': 0, 'persons': []},
+        '二建': {'count': 0, 'persons': []},
+        '二造': {'count': 0, 'persons': []},
+        '八大员': {'count': 0, 'detail': {}},
+        '其他': {'count': 0, 'persons': []},
+        '无证书': {'count': 0, 'persons': []}
+    }
+    total_with_cert = 0
+    
+    # 八大员证书关键词分类
+    badayuan_types = ['质量员', '施工员', '安全员', '测量员', '资料员', '材料员', '机械员', '劳务员', '标准员', '试验员']
+    
+    for row in cur.fetchall():
+        name = row['name']
+        cert = row['cert']
+        if cert and cert.strip() and cert != '/':
+            total_with_cert += 1
+            if '一建' in cert or '一级建造师' in cert:
+                cert_stats['一建']['count'] += 1
+                cert_stats['一建']['persons'].append(name)
+            elif '一造' in cert or '一级造价' in cert:
+                cert_stats['一造']['count'] += 1
+                cert_stats['一造']['persons'].append(name)
+            elif '二建' in cert or '二级建造师' in cert:
+                cert_stats['二建']['count'] += 1
+                cert_stats['二建']['persons'].append(name)
+            elif '二造' in cert or '二级造价' in cert:
+                cert_stats['二造']['count'] += 1
+                cert_stats['二造']['persons'].append(name)
+            elif any(k in cert for k in badayuan_types):
+                cert_stats['八大员']['count'] += 1
+                # 按证书子类型分组
+                found_type = '其他'
+                for t in badayuan_types:
+                    if t in cert:
+                        found_type = t
+                        break
+                if found_type not in cert_stats['八大员']['detail']:
+                    cert_stats['八大员']['detail'][found_type] = []
+                cert_stats['八大员']['detail'][found_type].append(name)
+            else:
+                cert_stats['其他']['count'] += 1
+                cert_stats['其他']['persons'].append(f"{name}（{cert}）")
+        else:
+            cert_stats['无证书']['count'] += 1
+            cert_stats['无证书']['persons'].append(name)
+    
+    # 一建指标
+    cur.execute("SELECT * FROM exam_targets WHERE exam_type='一建' LIMIT 1")
+    exam_row = cur.fetchone()
+    exam_target = None
+    if exam_row:
+        cur.execute("SELECT person_name FROM exam_target_persons WHERE target_id=%s ORDER BY id", (exam_row['id'],))
+        persons = [r['person_name'] for r in cur.fetchall()]
+        exam_target = {
+            'id': exam_row['id'],
+            'exam_type': exam_row['exam_type'],
+            'year': exam_row['year'],
+            'persons': persons
+        }
+    
+    cur.close()
+    conn.close()
+    
+    return jsonify({
+        'total': total,
+        'formal_count': formal,
+        'outsourced_count': c1 + c2,
+        'c1_count': c1,
+        'c2_count': c2,
+        'gender': {'male': male, 'female': female},
+        'edu': edu_stats,
+        'dept': dept_stats,
+        'cert': cert_stats,
+        'exam_target': exam_target
+    })
+
+# ============= 数据导出API =============
+
+@app.route('/api/export')
+def export_data():
+    """导出人员数据为Excel，支持多种导出类型"""
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from flask import send_file, request
+    from itertools import groupby
+
+    try:
+        # ---------- 1. 参数校验 ----------
+        export_type = request.args.get('type', 'all')
+        valid_types = {'all', 'regular', 'external', 'salary', 'project', 'dept'}
+        if export_type not in valid_types:
+            return jsonify({
+                'error': f'无效的导出类型，可选: {", ".join(valid_types)}'
+            }), 400
+
+        # ---------- 权限校验：salary和all只有管理员/领导班子可导出 ----------
+        can_view_sensitive = False  # 是否可看身份证等敏感字段
+        if export_type in ('salary', 'all'):
+            try:
+                user_phone = request.headers.get('X-User-Phone', '')
+                conn_auth = get_db()
+                cur_auth = conn_auth.cursor()
+                cur_auth.execute("SELECT is_admin, role FROM personnel WHERE phone = %s", (user_phone,))
+                auth_user = cur_auth.fetchone()
+                cur_auth.close()
+                conn_auth.close()
+                is_admin = auth_user and auth_user.get('is_admin', False)
+                is_leader = auth_user and auth_user.get('role', '') == 'leader'
+                if not is_admin and not is_leader:
+                    return jsonify({'error': '暂无导出权限'}), 403
+                can_view_sensitive = True
+            except Exception as auth_err:
+                print(f"[export] 权限校验跳过: {auth_err}")
+                can_view_sensitive = True  # 校验失败默认放行
+        else:
+            # 非salary/all类型，也检查是否可看敏感字段
+            try:
+                user_phone = request.headers.get('X-User-Phone', '')
+                conn_auth = get_db()
+                cur_auth = conn_auth.cursor()
+                cur_auth.execute("SELECT is_admin, role FROM personnel WHERE phone = %s", (user_phone,))
+                auth_user = cur_auth.fetchone()
+                cur_auth.close()
+                conn_auth.close()
+                is_admin = auth_user and auth_user.get('is_admin', False)
+                is_leader = auth_user and auth_user.get('role', '') == 'leader'
+                can_view_sensitive = is_admin or is_leader
+            except Exception:
+                can_view_sensitive = False
+
+        # ---------- 2. 数据库查询 ----------
+        conn = get_db()
+        cur = conn.cursor()
+
+        where_clause = ""
+        if export_type == 'regular':
+            where_clause = "WHERE p.category LIKE '%正式%'"
+        elif export_type == 'external':
+            where_clause = "WHERE p.category IN ('C1', 'C2')"
+
+        if export_type == 'salary':
+            # 工资导出：关联salary表
+            cur.execute(f"""
+                SELECT p.*, s.base_salary, s.edu_salary, s.skill_salary,
+                       s.seniority_salary, s.guarantee_salary, s.settlement_fee,
+                       s.talent_allowance, s.effective_date
+                FROM personnel p
+                LEFT JOIN salary s ON p.id = s.person_id
+                {where_clause}
+            """)
+        else:
+            cur.execute(f"SELECT * FROM personnel p {where_clause}")
+        people = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not people:
+            return jsonify({'error': '暂无数据可导出'}), 204
+
+        # ---------- 3. 排序（与小程序一致） ----------
+        def sort_key(p):
+            fixed_order = {'邱方恒': 0, '廖志成': 1, '吕亮': 2, '李强': 3}
+            fixed = fixed_order.get(p['name'], 99)
+            cat_order = {'正式职工': 0, 'C1': 1, 'C2': 2}
+            cat = cat_order.get(p.get('category', ''), 3)
+            project = p.get('project', '') or ''
+            if project == '后台':
+                proj = 0
+            elif project and project != '其他':
+                proj = 1
+            else:
+                proj = 2
+            position = (p.get('position', '') or '').lower()
+            if any(k in position for k in ['经理', '书记']):
+                pos = 0
+            elif any(k in position for k in ['部长', '主管', '副部长']):
+                pos = 1
+            else:
+                pos = 2
+            return (fixed, cat, proj, pos, p.get('name', ''))
+
+        people.sort(key=sort_key)
+
+        # ---------- 4. 类型配置中心 ----------
+        TYPE_CONFIG = {
+            'all': {
+                'filename': '安装公司全部人员花名册.xlsx',
+                'sheet_title': '总表',
+                'headers': ['序号', '姓名', '性别', '学历', '毕业学校', '专业', '职务/职称', '所属项目', '入职时间', '工龄', '证书', '工作经历', '联系方式', '用工形式'],
+                'need_group': True,
+                'multi_sheet': True
+            },
+            'huamingce': {
+                'filename': '安装公司人员花名册.xlsx',
+                'sheet_title': '总表',
+                'headers': ['序号', '姓名', '性别', '学历', '毕业学校', '专业', '职务/职称', '所属项目', '入职时间', '工龄', '证书', '工作经历', '联系方式', '用工形式'],
+                'need_group': True,
+                'multi_sheet': True
+            },
+            'regular': {
+                'filename': '安装公司正式职工花名册.xlsx',
+                'sheet_title': '正式职工名单',
+                'headers': ['序号', '姓名', '性别', '学历', '毕业学校', '专业', '职务/职称', '所属项目', '入职时间', '工龄', '证书', '工作经历', '联系方式', '用工形式'],
+                'need_group': False
+            },
+            'external': {
+                'filename': '安装公司外聘人员花名册.xlsx',
+                'sheet_title': '外聘人员名单',
+                'headers': ['序号', '姓名', '性别', '学历', '毕业学校', '专业', '职务/职称', '所属项目', '入职时间', '工龄', '证书', '工作经历', '联系方式', '用工形式'],
+                'need_group': False
+            },
+            'salary': {
+                'filename': '安装公司工资数据.xlsx',
+                'sheet_title': '工资数据',
+                'headers': ['序号', '姓名', '工号', '部门', '岗位工资', '学历工资', '技能工资',
+                           '工龄工资', '最低保障工资', '结算费', '人才津贴', '合计', '入职日期', '生效日期'],
+                'need_group': False
+            },
+            'project': {
+                'filename': '安装公司按项目分组花名册.xlsx',
+                'sheet_title': '按项目分组名单',
+                'headers': ['序号', '姓名', '性别', '岗位', '部门', '项目', '类别', '状态'],
+                'need_group': True,
+                'group_by': 'project'
+            },
+            'dept': {
+                'filename': '安装公司按部门分组花名册.xlsx',
+                'sheet_title': '按部门分组名单',
+                'headers': ['序号', '姓名', '性别', '岗位', '部门', '项目', '类别', '状态'],
+                'need_group': True,
+                'group_by': 'dept'
+            }
+        }
+
+        config = TYPE_CONFIG[export_type]
+
+        # ---------- 5. 初始化 Excel ----------
+        wb = Workbook()
+        ws = wb.active
+        ws.title = config['sheet_title']
+
+        # 样式定义
+        thin = Side(style='thin', color='B4B4B4')
+        border_all = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        header_font = Font(name='微软雅黑', size=11, bold=True, color='FFFFFF')
+        header_fill = PatternFill(start_color='4F46E5', end_color='4F46E5', fill_type='solid')
+
+        data_font = Font(name='微软雅黑', size=10)
+
+        group_font = Font(name='微软雅黑', size=10, bold=True, color='FFFFFF')
+        group_fill = PatternFill(start_color='059669', end_color='059669', fill_type='solid')
+
+        subtotal_font = Font(name='微软雅黑', size=10, bold=True, color='92400E')
+        subtotal_fill = PatternFill(start_color='FEF3C7', end_color='FEF3C7', fill_type='solid')
+
+        center_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        left_align = Alignment(horizontal='left', vertical='center', wrap_text=True)
+
+        # ---------- 6. 写入表头 ----------
+        headers = config['headers']
+        for col, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = center_align
+            cell.border = border_all
+
+        # 不用freeze_panes，手机查看器可能不兼容
+
+        # ---------- 7. 数据映射函数 ----------
+        def get_row_data(p, idx, export_type):
+            dept = p.get('dept', '') or get_dept(p)
+            id_card = p.get('id_card', '') if can_view_sensitive else '***'
+
+            if export_type in ('all', 'regular', 'external', 'huamingce'):
+                return [
+                    idx + 1,
+                    p['name'],
+                    p.get('gender', ''),
+                    p.get('edu', ''),
+                    p.get('school', ''),
+                    p.get('major', ''),
+                    p.get('position', ''),
+                    p.get('project', ''),
+                    p.get('hire_date', ''),
+                    '',  # 工龄
+                    p.get('cert', ''),
+                    '',  # 工作经历
+                    p.get('phone', ''),
+                    p.get('category', '')
+                ]
+
+            elif export_type == 'salary':
+                # 从salary表获取细分工资
+                base = float(p.get('base_salary', 0) or 0)
+                edu = float(p.get('edu_salary', 0) or 0)
+                skill = float(p.get('skill_salary', 0) or 0)
+                seniority = float(p.get('seniority_salary', 0) or 0)
+                guarantee = float(p.get('guarantee_salary', 0) or 0)
+                settlement = float(p.get('settlement_fee', 0) or 0)
+                talent = float(p.get('talent_allowance', 0) or 0)
+                total = base + edu + skill + seniority + guarantee + settlement + talent
+                # 如果salary表没数据，用personnel.salary兜底
+                if total == 0 and p.get('salary'):
+                    total = float(p['salary'])
+
+                return [
+                    idx + 1,
+                    p['name'],
+                    p.get('id', ''),
+                    dept,
+                    base if base else '',
+                    edu if edu else '',
+                    skill if skill else '',
+                    seniority if seniority else '',
+                    guarantee if guarantee else '',
+                    settlement if settlement else '',
+                    talent if talent else '',
+                    total if total else '',
+                    p.get('hire_date', ''),
+                    p.get('effective_date', '')
+                ]
+
+            elif export_type in ('project', 'dept'):
+                return [
+                    idx + 1,
+                    p['name'],
+                    p.get('gender', ''),
+                    p.get('position', ''),
+                    dept,
+                    p.get('project', ''),
+                    p.get('category', ''),
+                    p.get('status', '')
+                ]
+
+        # ---------- 8. 写入数据 ----------
+        current_row = 2
+
+        # huamingce/all类型：多sheet导出
+        if export_type in ('huamingce', 'all', 'regular', 'external', 'project', 'dept'):
+            # 定义部门分组顺序
+            backend_dept_order = [
+                '领导班子', '商务法务部', '供应链中心', '预算中心',
+                'BIM组', '设计组', '生产管理中心', '安全环保部',
+                '财务部', '综合办公室', '其他后台'
+            ]
+
+            # 分组函数
+            def is_leader(pos):
+                if not pos:
+                    return False
+                keywords = ['经理', '书记', '部长', '主任', '副经理', '副部长', '副主任', '负责人']
+                return any(k in str(pos) for k in keywords)
+
+            def get_backend_dept(p):
+                pos = str(p.get('position', '') or '')
+                name = p.get('name', '')
+                if name == '罗伟':
+                    return '设计组'
+                elif name in ['王丽娜', '王婉怡', '张宇', '张烨帆']:
+                    return '供应链中心'
+                elif name == '罗婷':
+                    return '财务部'
+                elif name == '程实':
+                    return '综合办公室'
+                elif name in ['陈晓涛', '董自明']:
+                    return '其他后台'
+                elif '经理' in pos and '副经理' not in pos and '正式' in str(p.get('category', '')):
+                    return '领导班子'
+                elif '书记' in pos:
+                    return '领导班子'
+                elif '副经理' in pos:
+                    return '领导班子'
+                elif '会计' in pos or '财务' in pos:
+                    return '财务部'
+                elif '商务' in pos or '成本' in pos or '结算' in pos:
+                    return '商务法务部'
+                elif 'BIM' in pos or 'bim' in pos:
+                    return 'BIM组'
+                elif '设计' in pos or '暖通' in pos or '电气' in pos:
+                    return '设计组'
+                elif '安全' in pos:
+                    return '安全环保部'
+                elif '调度' in pos or '生产' in pos or '策划' in pos:
+                    return '生产管理中心'
+                elif '文员' in pos or '综合' in pos or '司机' in pos:
+                    return '综合办公室'
+                elif '预算' in pos:
+                    return '预算中心'
+                else:
+                    return '其他后台'
+            # 项目名标准化映射
+            project_name_map = {
+                '康定站项目': '康定站',
+                '红星路项目': '红星路',
+                '西南交大': '西南交大片区',
+                '重庆区域项目': '重庆区域',
+                '荣县EPC项目': '荣县EPC',
+            }
+
+            # 分离后台和项目部
+            backend_people = [p for p in people if (p.get('project') or '') in ['后台', '未分配']]
+            project_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配', '预算中心', '供应链中心', '其他']]
+
+            # 后台按部门分组
+            backend_groups = {}
+            for p in backend_people:
+                dept = get_backend_dept(p)
+                if dept not in backend_groups:
+                    backend_groups[dept] = []
+                backend_groups[dept].append(p)
+
+            # 项目部按项目分组（标准化项目名）
+            project_groups = {}
+            for p in project_people:
+                proj = p.get('project') or '未分配'
+                proj = project_name_map.get(proj, proj)  # 标准化项目名
+                if proj not in project_groups:
+                    project_groups[proj] = []
+                project_groups[proj].append(p)
+
+            # 写入sheet函数
+            def write_sheet(ws, title, groups, group_order, headers, styles):
+                header_font, header_fill, data_font, dept_fill, leader_fill, center_align, left_align, thin_border = styles
+
+                # 表头
+                ws.title = title
+                for col, h in enumerate(headers, 1):
+                    cell = ws.cell(row=2, column=col, value=h)
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = center_align
+                    cell.border = thin_border
+
+                # 标题行
+                ws.merge_cells('A1:N1')
+                title_cell = ws.cell(row=1, column=1, value=f'中铁建工集团西南分公司安装公司{title}')
+                title_cell.font = Font(name='微软雅黑', size=14, bold=True)
+                title_cell.alignment = Alignment(horizontal='center', vertical='center')
+
+                row_idx = 3
+                seq = 1
+                total_formal = 0
+                total_c1 = 0
+                total_c2 = 0
+                
+                for dept in group_order:
+                    if dept not in groups:
+                        continue
+                    group = groups[dept]
+
+                    # 统计各类别人数
+                    formal_count = len([p for p in group if p.get('category') == '正式职工'])
+                    c1_count = len([p for p in group if p.get('category') == 'C1'])
+                    c2_count = len([p for p in group if p.get('category') == 'C2'])
+                    total_formal += formal_count
+                    total_c1 += c1_count
+                    total_c2 += c2_count
+                    
+                    # 构建统计文字
+                    counts = []
+                    if formal_count > 0:
+                        counts.append(f'正式{formal_count}')
+                    if c1_count > 0:
+                        counts.append(f'C1:{c1_count}')
+                    if c2_count > 0:
+                        counts.append(f'C2:{c2_count}')
+                    count_str = '+'.join(counts) if counts else ''
+
+                    # 部门标题行
+                    ws.merge_cells(f'A{row_idx}:N{row_idx}')
+                    dept_cell = ws.cell(row=row_idx, column=1, value=f'{dept}（{len(group)}人：{count_str}）')
+                    dept_cell.font = Font(name='微软雅黑', size=10, bold=True)
+                    dept_cell.fill = dept_fill
+                    dept_cell.alignment = left_align
+                    dept_cell.border = thin_border
+                    for col in range(2, 15):
+                        ws.cell(row=row_idx, column=col).border = thin_border
+                    row_idx += 1
+
+                    # 领导优先
+                    leaders = [p for p in group if is_leader(p.get('position'))]
+                    others = [p for p in group if not is_leader(p.get('position'))]
+
+                    for p in leaders + others:
+                        row_data = get_row_data(p, seq - 1, export_type)
+                        row_data[0] = seq
+                        for col, val in enumerate(row_data, 1):
+                            cell = ws.cell(row=row_idx, column=col, value=val)
+                            cell.font = data_font
+                            cell.alignment = center_align
+                            cell.border = thin_border
+                            if is_leader(p.get('position')):
+                                cell.fill = leader_fill
+                        seq += 1
+                        row_idx += 1
+
+                # 总计行
+                total_count = total_formal + total_c1 + total_c2
+                total_counts = []
+                if total_formal > 0:
+                    total_counts.append(f'正式{total_formal}')
+                if total_c1 > 0:
+                    total_counts.append(f'C1:{total_c1}')
+                if total_c2 > 0:
+                    total_counts.append(f'C2:{total_c2}')
+                total_str = '+'.join(total_counts) if total_counts else ''
+                
+                ws.merge_cells(f'A{row_idx}:N{row_idx}')
+                total_cell = ws.cell(row=row_idx, column=1, value=f'合计（{total_count}人：{total_str}）')
+                total_cell.font = Font(name='微软雅黑', size=11, bold=True, color='FFFFFF')
+                total_cell.fill = PatternFill(start_color='4F46E5', end_color='4F46E5', fill_type='solid')
+                total_cell.alignment = left_align
+                total_cell.border = thin_border
+                for col in range(2, 15):
+                    ws.cell(row=row_idx, column=col).border = thin_border
+                    ws.cell(row=row_idx, column=col).fill = PatternFill(start_color='4F46E5', end_color='4F46E5', fill_type='solid')
+                row_idx += 1
+
+                # 设置列宽
+                widths = [6, 10, 6, 8, 20, 16, 22, 18, 12, 8, 30, 40, 15, 10]
+                for i, w in enumerate(widths):
+                    ws.column_dimensions[chr(65+i)].width = w
+
+                return row_idx
+
+            # 样式
+            header_font = Font(name='微软雅黑', size=11, bold=True)
+            header_fill = PatternFill(start_color='D9E1F2', end_color='D9E1F2', fill_type='solid')
+            data_font = Font(name='微软雅黑', size=10)
+            dept_fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+            leader_fill = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+            center_align = Alignment(horizontal='center', vertical='center')
+            left_align = Alignment(horizontal='left', vertical='center')
+            thin = Side(style='thin', color='B4B4B4')
+            thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            styles = (header_font, header_fill, data_font, dept_fill, leader_fill, center_align, left_align, thin_border)
+
+            # 花名册项目顺序
+            project_order = [
+                '凤凰山', '大足站', '天府站', '崇州片区', '川南片区', '康定站',
+                '成达万', '成都北站', '林芝', '毕节', '红星路', '荣县EPC',
+                '西南交大片区', '贵州片区', '遂宁站', '重庆区域', '马厂坝'
+            ]
+
+            # 按花名册顺序排序项目的函数
+            def get_project_order(proj):
+                if proj in project_order:
+                    return project_order.index(proj)
+                return 999
+
+            # 正式职工（category包含"正式"）
+            formal_groups = {}
+            formal_order = []
+            for dept in backend_dept_order:
+                dept_formal = [p for p in backend_groups.get(dept, []) if '正式' in str(p.get('category', ''))]
+                if dept_formal:
+                    formal_groups[dept] = dept_formal
+                    formal_order.append(dept)
+            for proj in project_order:
+                if proj in project_groups:
+                    proj_formal = [p for p in project_groups[proj] if '正式' in str(p.get('category', ''))]
+                    if proj_formal:
+                        formal_groups[proj] = proj_formal
+                        formal_order.append(proj)
+
+            # 外包人员（C1+C2，不包括"正式"和"外包"）
+            outsource_groups = {}
+            outsource_order = []
+            for dept in backend_dept_order:
+                dept_out = [p for p in backend_groups.get(dept, []) if p.get('category') in ('C1', 'C2')]
+                if dept_out:
+                    outsource_groups[dept] = dept_out
+                    outsource_order.append(dept)
+            for proj in project_order:
+                if proj in project_groups:
+                    proj_out = [p for p in project_groups[proj] if p.get('category') in ('C1', 'C2')]
+                    if proj_out:
+                        outsource_groups[proj] = proj_out
+                        outsource_order.append(proj)
+
+            # 总表（后台+项目部）
+            all_groups = {}
+            for dept in backend_dept_order:
+                if dept in backend_groups:
+                    all_groups[dept] = backend_groups[dept]
+            for proj in sorted(project_groups.keys(), key=get_project_order):
+                all_groups[proj] = project_groups[proj]
+
+            # 根据导出类型写入对应的sheet
+            if export_type in ('all', 'huamingce'):
+                # 全部：5个sheet
+                write_sheet(ws, '总表', all_groups, list(all_groups.keys()), headers, styles)
+                ws_backend = wb.create_sheet()
+                write_sheet(ws_backend, '后台', backend_groups, backend_dept_order, headers, styles)
+                ws_project = wb.create_sheet()
+                write_sheet(ws_project, '项目部', project_groups, sorted(project_groups.keys(), key=get_project_order), headers, styles)
+                ws_formal = wb.create_sheet()
+                write_sheet(ws_formal, '正式职工表', formal_groups, formal_order, headers, styles)
+                ws_outsource = wb.create_sheet()
+                write_sheet(ws_outsource, '外包人员表', outsource_groups, outsource_order, headers, styles)
+            elif export_type == 'regular':
+                # 正式职工：只导出正式职工表
+                write_sheet(ws, '正式职工表', formal_groups, formal_order, headers, styles)
+            elif export_type == 'external':
+                # 外聘人员：只导出外包人员表
+                write_sheet(ws, '外包人员表', outsource_groups, outsource_order, headers, styles)
+            elif export_type == 'project':
+                # 按项目分组：只导出项目部
+                write_sheet(ws, '项目部', project_groups, sorted(project_groups.keys(), key=get_project_order), headers, styles)
+            elif export_type == 'dept':
+                # 按部门分组：只导出后台
+                write_sheet(ws, '后台', backend_groups, backend_dept_order, headers, styles)
+
+        elif not config.get('need_group'):
+            # 定义部门分组顺序
+            backend_dept_order = [
+                '领导班子', '商务法务部', '供应链中心', '预算中心',
+                'BIM组', '设计组', '生产管理中心', '安全环保部',
+                '财务部', '综合办公室', '其他后台'
+            ]
+
+            # 分组函数
+            def is_leader(pos):
+                if not pos:
+                    return False
+                keywords = ['经理', '书记', '部长', '主任', '副经理', '副部长', '副主任', '负责人']
+                return any(k in str(pos) for k in keywords)
+
+            def get_backend_dept(p):
+                pos = str(p.get('position', '') or '')
+                name = p.get('name', '')
+                if name == '罗伟':
+                    return '设计组'
+                elif name in ['王丽娜', '王婉怡', '张宇', '张烨帆']:
+                    return '供应链中心'
+                elif name == '罗婷':
+                    return '财务部'
+                elif name == '程实':
+                    return '综合办公室'
+                elif name in ['陈晓涛', '董自明']:
+                    return '其他后台'
+                elif '经理' in pos and '副经理' not in pos and '正式' in str(p.get('category', '')):
+                    return '领导班子'
+                elif '书记' in pos:
+                    return '领导班子'
+                elif '副经理' in pos:
+                    return '领导班子'
+                elif '会计' in pos or '财务' in pos:
+                    return '财务部'
+                elif '商务' in pos or '成本' in pos or '结算' in pos:
+                    return '商务法务部'
+                elif 'BIM' in pos or 'bim' in pos:
+                    return 'BIM组'
+                elif '设计' in pos or '暖通' in pos or '电气' in pos:
+                    return '设计组'
+                elif '安全' in pos:
+                    return '安全环保部'
+                elif '调度' in pos or '生产' in pos or '策划' in pos:
+                    return '生产管理中心'
+                elif '文员' in pos or '综合' in pos or '司机' in pos:
+                    return '综合办公室'
+                elif '预算' in pos:
+                    return '预算中心'
+                else:
+                    return '其他后台'
+
+            # 项目名标准化映射
+            project_name_map = {
+                '康定站项目': '康定站',
+                '红星路项目': '红星路',
+                '西南交大': '西南交大片区',
+                '重庆区域项目': '重庆区域',
+                '荣县EPC项目': '荣县EPC',
+            }
+            # 分离后台和项目部
+            backend_people = [p for p in people if (p.get('project') or '') in ['后台', '未分配']]
+            project_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配', '预算中心', '供应链中心', '其他']]
+
+            # 后台按部门分组
+            backend_groups = {}
+            for p in backend_people:
+                dept = get_backend_dept(p)
+                if dept not in backend_groups:
+                    backend_groups[dept] = []
+                backend_groups[dept].append(p)
+
+            # 项目部按项目分组（标准化项目名）
+            project_groups = {}
+            for p in project_people:
+                proj = p.get('project') or '未分配'
+                proj = project_name_map.get(proj, proj)  # 标准化项目名
+                if proj not in project_groups:
+                    project_groups[proj] = []
+                project_groups[proj].append(p)
+
+        elif not config.get('need_group'):
+            for i, p in enumerate(people):
+                row_data = get_row_data(p, i, export_type)
+                for col, val in enumerate(row_data, 1):
+                    cell = ws.cell(row=current_row, column=col, value=val)
+                    cell.font = data_font
+                    cell.alignment = center_align if col <= 3 else left_align
+                    cell.border = border_all
+                current_row += 1
+
+        else:
+            group_key = config['group_by']
+            
+            # 按项目分组时只包含项目部人员（排除预算中心/供应链中心/其他），按后台分组时包含后台人员+预算中心/供应链中心等
+            if group_key == 'project':
+                # 排除后台、未分配、预算中心、供应链中心、其他
+                filtered_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配', '预算中心', '供应链中心', '其他']]
+            elif group_key == 'dept':
+                # 后台人员 + 预算中心/供应链中心等后台部门人员
+                def is_backend_or_support(p):
+                    project = p.get('project') or ''
+                    # 后台人员
+                    if project in ['后台', '未分配']:
+                        return True
+                    # 预算中心/供应链中心等后台部门
+                    if project in ['预算中心', '供应链中心']:
+                        return True
+                    return False
+                filtered_people = [p for p in people if is_backend_or_support(p)]
+            else:
+                filtered_people = people
+            
+            # 排序函数
+            def sort_key_group(p):
+                val = p.get(group_key, '') or '未分组'
+                if group_key == 'project':
+                    return (get_project_order(val), val)
+                return val
+            
+            people_sorted = sorted(filtered_people, key=sort_key_group)
+
+            group_idx = 1
+            for group_name, group_members in groupby(people_sorted,
+                                                      key=lambda x: x.get(group_key, '') or '未分组'):
+                group_members = list(group_members)
+                group_count = len(group_members)
+                group_salary_sum = sum(
+                    float(p['salary']) if p.get('salary') else 0
+                    for p in group_members
+                )
+
+                # 分组标题行
+                ws.cell(row=current_row, column=1, value=f"【{group_name}】")
+                for col in range(1, len(headers) + 1):
+                    cell = ws.cell(row=current_row, column=col)
+                    cell.font = group_font
+                    cell.fill = group_fill
+                    cell.alignment = left_align
+                    cell.border = border_all
+                ws.merge_cells(start_row=current_row, start_column=1,
+                               end_row=current_row, end_column=len(headers))
+                current_row += 1
+
+                # 组成员数据
+                for p in group_members:
+                    row_data = get_row_data(p, group_idx - 1, export_type)
+                    row_data[0] = group_idx
+                    for col, val in enumerate(row_data, 1):
+                        cell = ws.cell(row=current_row, column=col, value=val)
+                        cell.font = data_font
+                        cell.alignment = center_align if col <= 3 else left_align
+                        cell.border = border_all
+                    current_row += 1
+                    group_idx += 1
+
+                # 小计行
+                subtotal_row = [''] * len(headers)
+                subtotal_row[0] = '小计'
+                subtotal_row[1] = f'{group_count}人'
+                salary_col = headers.index('工资') + 1 if '工资' in headers else 0
+                if salary_col:
+                    subtotal_row[salary_col - 1] = group_salary_sum
+
+                for col, val in enumerate(subtotal_row, 1):
+                    cell = ws.cell(row=current_row, column=col, value=val)
+                    cell.font = subtotal_font
+                    cell.fill = subtotal_fill
+                    cell.alignment = center_align
+                    cell.border = border_all
+                current_row += 1
+                group_idx = 1
+
+        # ---------- 9. 自动列宽（中文按2字符计算） ----------
+        from openpyxl.utils import get_column_letter
+        for col in range(1, len(headers) + 1):
+            max_len = len(str(headers[col - 1]))
+            for row in range(1, current_row):
+                cell = ws.cell(row=row, column=col)
+                if hasattr(cell, 'value') and cell.value is not None:
+                    val_str = str(cell.value)
+                    display_len = sum(2 if ord(c) > 127 else 1 for c in val_str)
+                    max_len = max(max_len, display_len)
+            ws.column_dimensions[get_column_letter(col)].width = min(max_len + 3, 35)
+
+        ws.row_dimensions[1].height = 28
+        for row in range(2, current_row):
+            ws.row_dimensions[row].height = 22
+
+        # ---------- 10. 输出文件（base64，走云托管通道） ----------
+        import base64
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        b64_data = base64.b64encode(output.read()).decode('utf-8')
+
+        return jsonify({
+            'filename': config['filename'],
+            'data': b64_data
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"[export_data] error: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# ============= 登录API =============
+
+# ============= 一建指标API =============
+
+@app.route('/api/exam-targets', methods=['GET'])
+def get_exam_targets():
+    """获取一建指标"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT * FROM exam_targets ORDER BY year DESC LIMIT 1")
+    target = cur.fetchone()
+    
+    if target:
+        cur.execute("SELECT person_name FROM exam_target_persons WHERE target_id=%s ORDER BY id", (target['id'],))
+        persons = [r['person_name'] for r in cur.fetchall()]
+        result = {
+            'id': target['id'],
+            'exam_type': target['exam_type'],
+            'year': target['year'],
+            'persons': persons
+        }
+    else:
+        result = None
+    
+    cur.close()
+    conn.close()
+    return jsonify(result)
+
+@app.route('/api/exam-targets', methods=['POST'])
+def save_exam_targets():
+    """保存一建指标"""
+    data = request.json
+    exam_type = data.get('exam_type', '一建')
+    year = data.get('year', 2026)
+    persons = data.get('persons', [])
+    
+    conn = get_db()
+    cur = conn.cursor()
+    
+    try:
+        # 查找或创建指标
+        cur.execute("SELECT id FROM exam_targets WHERE exam_type=%s AND year=%s", (exam_type, year))
+        row = cur.fetchone()
+        
+        if row:
+            target_id = row['id']
+            # 更新时间
+            cur.execute("UPDATE exam_targets SET updated_at=NOW() WHERE id=%s", (target_id,))
+            # 删除旧人员
+            cur.execute("DELETE FROM exam_target_persons WHERE target_id=%s", (target_id,))
+        else:
+            cur.execute("INSERT INTO exam_targets (exam_type, year) VALUES (%s, %s) RETURNING id", (exam_type, year))
+            target_id = cur.fetchone()['id']
+        
+        # 插入新人员
+        for name in persons:
+            cur.execute("INSERT INTO exam_target_persons (target_id, person_name) VALUES (%s, %s)", (target_id, name))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({'success': True})
+    except Exception as e:
+        conn.rollback()
+        cur.close()
+        conn.close()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    """用户登录"""
+    data = request.json
+    phone = data.get('phone','').strip()
+    password = data.get('password','').strip()
+    
+    if not phone or not password:
+        return jsonify({'error': '手机号和密码不能为空'}), 400
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE phone=%s", (phone,))
+    user = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    if not user:
+        return jsonify({'error': '用户不存在'}), 401
+    if user['password'] != password:
+        return jsonify({'error': '密码错误'}), 401
+    
+    token = hashlib.md5(f"{phone}:{password}:{datetime.now().date()}".encode()).hexdigest()
+    
+    return jsonify({
+        'success': True,
+        'token': token,
+        'user': {
+            'phone': user['phone'],
+            'name': user['name'],
+            'is_admin': user['is_admin']
+        }
+    })
+
+@app.route('/api/change-password', methods=['PUT'])
+def change_password():
+    """修改密码"""
+    data = request.json
+    phone = data.get('phone', '').strip()
+    old_password = data.get('old_password', '').strip()
+    new_password = data.get('new_password', '').strip()
+    
+    if not phone or not old_password or not new_password:
+        return jsonify({'error': '信息不完整'}), 400
+    
+    if len(new_password) < 6:
+        return jsonify({'error': '新密码至少6位'}), 400
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT password FROM users WHERE phone=%s", (phone,))
+        user = cur.fetchone()
+        
+        if not user:
+            cur.close(); conn.close()
+            return jsonify({'error': '用户不存在'}), 404
+        
+        if user['password'] != old_password:
+            cur.close(); conn.close()
+            return jsonify({'error': '原密码错误'}), 401
+        
+        cur.execute("UPDATE users SET password=%s WHERE phone=%s", (new_password, phone))
+        conn.commit()
+        cur.close(); conn.close()
+        return jsonify({'success': True, 'message': '密码修改成功'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/reset-password', methods=['POST'])
+def reset_password():
+    """重置密码（仅超级管理员18184005669）"""
+    data = request.json
+    phone = data.get('phone', '').strip()
+    admin_phone = data.get('admin_phone', '').strip()
+    
+    if not phone:
+        return jsonify({'error': '手机号不能为空'}), 400
+    
+    # 只允许超级管理员18184005669重置密码
+    SUPER_ADMIN = '18184005669'
+    if admin_phone != SUPER_ADMIN:
+        return jsonify({'error': '请联系办公室徐钟亿进行密码重置'}), 403
+    
+    # 禁止重置超级管理员自己的账号（防止被滥用）
+    if phone == SUPER_ADMIN:
+        return jsonify({'error': '超级管理员账号不能通过此方式重置密码，请联系系统管理员'}), 403
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # 验证管理员身份
+        cur.execute("SELECT is_admin FROM users WHERE phone=%s", (admin_phone,))
+        admin = cur.fetchone()
+        if not admin or not admin['is_admin']:
+            cur.close(); conn.close()
+            return jsonify({'error': '无权限'}), 403
+        
+        # 重置为默认密码
+        cur.execute("UPDATE users SET password='123456' WHERE phone=%s", (phone,))
+        if cur.rowcount == 0:
+            cur.close(); conn.close()
+            return jsonify({'error': '用户不存在'}), 404
+        
+        conn.commit()
+        cur.close(); conn.close()
+        return jsonify({'success': True, 'message': '密码已重置为123456'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ============= 工资信息API =============
+
+@app.route('/api/salary/<person_id>')
+def get_salary(person_id):
+    """获取人员工资信息（仅本人/管理员）"""
+    current_user = get_current_user()
+    is_admin = current_user and current_user.get('is_admin', False)
+    
+    # 获取人员信息
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, phone FROM personnel WHERE id=%s", (person_id,))
+    person = cur.fetchone()
+    
+    if not person:
+        cur.close(); conn.close()
+        return jsonify({'error': '未找到该人员'}), 404
+    
+    # 权限检查：仅本人或管理员
+    is_self = current_user and current_user.get('phone') == person.get('phone')
+    if not is_admin and not is_self:
+        cur.close(); conn.close()
+        return jsonify({'error': '无权限查看'}), 403
+    
+    # 查询工资信息
+    cur.execute("""
+        SELECT person_name, document_no, document_title, pdf_filename,
+            base_salary, edu_salary, skill_salary, seniority_salary, 
+            guarantee_salary, settlement_fee, talent_allowance, effective_date,
+            pdf_storage_path
+        FROM salary WHERE person_name=%s ORDER BY effective_date DESC
+    """, (person['name'],))
+    
+    SUPABASE_URL = "https://kohuwtvxfvgbjdbmszao.supabase.co"
+    salary_records = []
+    for row in cur.fetchall():
+        pdf_url = None
+        if row.get('pdf_storage_path'):
+            pdf_url = f"{SUPABASE_URL}/storage/v1/object/public/salary-pdfs/{row['pdf_storage_path']}"
+        
+        salary_records.append({
+            'person_name': row.get('person_name'),
+            'document_no': row.get('document_no'),
+            'document_title': row.get('document_title'),
+            'pdf_filename': row.get('pdf_filename'),
+            'base_salary': float(row.get('base_salary') or 0),
+            'edu_salary': float(row.get('edu_salary') or 0),
+            'skill_salary': float(row.get('skill_salary') or 0),
+            'seniority_salary': float(row.get('seniority_salary') or 0),
+            'guarantee_salary': float(row.get('guarantee_salary') or 0),
+            'settlement_fee': float(row.get('settlement_fee') or 0),
+            'talent_allowance': float(row.get('talent_allowance') or 0),
+            'effective_date': str(row.get('effective_date')) if row.get('effective_date') else None,
+            'pdf_url': pdf_url
+        })
+    
+    cur.close(); conn.close()
+    return jsonify({'salary_records': salary_records})
+
+@app.route('/api/salary/pdf/<filename>')
+def get_salary_pdf(filename):
+    """下载人事令PDF（仅本人/管理员）"""
+    import os
+    from flask import send_file
+    
+    current_user = get_current_user()
+    if not current_user:
+        return jsonify({'error': '请先登录'}), 401
+    
+    # 安全检查：防止路径遍历
+    if '..' in filename or '/' in filename:
+        return jsonify({'error': '无效文件名'}), 400
+    
+    # PDF文件目录（生产环境需要改为云存储路径）
+    pdf_dir = "/mnt/e/BaiduNetdiskDownload/安装公司/人力资源/人事令"
+    pdf_path = os.path.join(pdf_dir, filename)
+    
+    if not os.path.exists(pdf_path):
+        return jsonify({'error': '文件不存在'}), 404
+    
+    # 权限检查：管理员或本人可以下载
+    # 需要从filename中提取人员姓名来验证
+    import re
+    name_match = re.search(r'关于(.{2,4})(内部调动|毕业分配|职务任免|转正定职|技术职务聘任)', filename)
+    if name_match:
+        person_name = name_match.group(1)
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT phone FROM personnel WHERE name=%s", (person_name,))
+        person = cur.fetchone()
+        cur.close(); conn.close()
+        
+        is_self = person and current_user.get('phone') == person.get('phone')
+        is_admin = current_user.get('is_admin', False)
+        
+        if not is_admin and not is_self:
+            return jsonify({'error': '无权限下载'}), 403
+    else:
+        # 无法识别姓名，仅管理员可下载
+        if not current_user.get('is_admin', False):
+            return jsonify({'error': '无权限下载'}), 403
+    
+    return send_file(pdf_path, mimetype='application/pdf', as_attachment=False)
+
+# ============= Render部署 =============
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
+
+# ============= 数据迁移接口 =============
+@app.route('/api/migrate-to-tcb')
+def migrate_to_tcb():
+    """从Supabase迁移数据到微信云开发数据库"""
+    import requests as req
+    import json as _json
+    import os
+    
+    # 读取API Key
+    api_key = ""
+    key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".apikey")
+    if os.path.exists(key_file):
+        with open(key_file) as f:
+            api_key = f.read().strip()
+    
+    if not api_key:
+        return jsonify({"error": "API Key not found"})
+    
+    tcb_env = "personnel-api-d0gsohasr28067fae"
+    tcb_url = "https://api.weixin.qq.com/tcb/databaseadd"
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + api_key
+    }
+    
+    results = {}
+    
+    # 迁移personnel
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM personnel")
+        rows = cur.fetchall()
+        
+        success = 0
+        fail = 0
+        for row in rows:
+            data = dict(row)
+            for key, value in data.items():
+                if value is None:
+                    data[key] = ""
+                elif hasattr(value, 'isoformat'):
+                    data[key] = value.isoformat()
+                elif isinstance(value, (int, float)):
+                    data[key] = value
+                else:
+                    data[key] = str(value)
+            if 'salary' in data and data['salary'] == '':
+                del data['salary']
+            
+            query = 'db.collection("personnel").add({data:' + _json.dumps(data, ensure_ascii=False) + '})'
+            payload = {"env": tcb_env, "query": query}
+            r = req.post(tcb_url, headers=headers, json=payload, timeout=15)
+            result = r.json()
+            if result.get("errcode", 0) == 0:
+                success += 1
+            else:
+                fail += 1
+                if fail <= 2:
+                    results[f"personnel_error_{fail}"] = result
+        
+        results["personnel"] = f"成功 {success}, 失败 {fail}"
+        cur.close()
+        conn.close()
+    except Exception as e:
+        results["personnel_error"] = str(e)
+    
+    return jsonify(results)
+
+
+# ============= 任务管理 =============
+
+@app.route('/api/tasks', methods=['GET'])
+def get_tasks():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    role = request.args.get('role', 'my')
+    phone = user['phone']
+    name = user['name']
+    cur.execute("SELECT dept, project FROM personnel WHERE phone=%s OR name=%s", (phone, name))
+    me = cur.fetchone()
+    my_dept = me['dept'] if me else ''
+    my_project = me['project'] if me else ''
+    if user.get('is_admin'):
+        cur.execute("SELECT * FROM tasks ORDER BY created_at DESC")
+    elif role == 'dept' and my_dept:
+        cur.execute("SELECT * FROM tasks WHERE dept=%s ORDER BY created_at DESC", (my_dept,))
+    elif role == 'project' and my_project:
+        cur.execute("SELECT * FROM tasks WHERE project=%s ORDER BY created_at DESC", (my_project,))
+    else:
+        cur.execute("SELECT * FROM tasks WHERE assignee=%s ORDER BY created_at DESC", (name,))
+    tasks = cur.fetchall()
+    for t in tasks:
+        t['created_at'] = str(t['created_at']) if t['created_at'] else ''
+        t['updated_at'] = str(t['updated_at']) if t['updated_at'] else ''
+    cur.close()
+    conn.close()
+    return jsonify(tasks)
+
+@app.route('/api/tasks', methods=['POST'])
+def create_task():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    data = request.json
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    assignee = data.get('assignee', '')
+    assignee_id = data.get('assignee_id', '')
+
+    # 指定人员时：根据 id 查 phone/dept/project（同名人员用 id 区分）
+    assignee_phone = ''
+    final_dept = data.get('dept', '')
+    final_project = data.get('project', '')
+
+    if assignee_id:
+        cur.execute("SELECT phone, dept, project FROM personnel WHERE id=%s LIMIT 1", (assignee_id,))
+        row = cur.fetchone()
+        if row:
+            assignee_phone = row.get('phone') or ''
+            # 指定人员时强制以 personnel 表为准（防止发布时填错）
+            final_dept = row.get('dept') or ''
+            final_project = row.get('project') or ''
+    elif assignee:
+        # 没传 id 但传了名字（兼容老调用）：尝试按名字查
+        cur.execute("SELECT phone, dept, project FROM personnel WHERE name=%s AND (leave_date IS NULL OR leave_date='') LIMIT 1", (assignee,))
+        row = cur.fetchone()
+        if row and (not final_dept or not final_project):
+            # 仅在用户没传 dept/project 时才覆盖
+            final_dept = final_dept or (row.get('dept') or '')
+            final_project = final_project or (row.get('project') or '')
+
+    cur.execute("""INSERT INTO tasks (title, content, publisher, publisher_name,
+        assignee, assignee_id, assignee_phone, dept, project, deadline)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (data.get('title',''), data.get('content',''), user['phone'], user['name'],
+         assignee, assignee_id, assignee_phone,
+         final_dept, final_project, data.get('deadline','')))
+    task_id = cur.fetchone()['id']
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True, 'id': task_id})
+
+@app.route('/api/tasks/<int:task_id>', methods=['PUT'])
+def update_task(task_id):
+    """修改任务（仅超管），支持修改标题/内容/责任人/截止日期"""
+    user_phone = request.headers.get('X-User-Phone', '')
+    if user_phone != '18184005669':
+        return jsonify({'error': '无权限（仅超级管理员）'}), 403
+
+    data = request.json
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    # 校验任务存在
+    cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+    task = cur.fetchone()
+    if not task:
+        cur.close(); conn.close()
+        return jsonify({'error': '任务不存在'}), 404
+
+    # 组装更新字段
+    updates = []
+    params = []
+
+    if 'title' in data:
+        updates.append('title=%s')
+        params.append(data['title'].strip())
+
+    if 'content' in data:
+        updates.append('content=%s')
+        params.append(data.get('content', ''))
+
+    if 'deadline' in data:
+        updates.append('deadline=%s')
+        params.append(data['deadline'])
+
+    # 责任人变更（核心需求）
+    if 'assignee' in data or 'assignee_id' in data:
+        new_assignee = data.get('assignee', task['assignee'])
+        new_assignee_id = data.get('assignee_id', task.get('assignee_id', ''))
+
+        # 自动带 dept/project/phone（与 create_task 逻辑一致）
+        new_dept = task.get('dept', '')
+        new_project = task.get('project', '')
+        new_phone = task.get('assignee_phone', '')
+
+        if new_assignee_id:
+            cur.execute("SELECT phone, dept, project FROM personnel WHERE id=%s LIMIT 1", (new_assignee_id,))
+            row = cur.fetchone()
+            if row:
+                new_phone = row.get('phone') or ''
+                new_dept = row.get('dept') or ''
+                new_project = row.get('project') or ''
+        elif new_assignee and new_assignee != task['assignee']:
+            cur.execute("SELECT phone, dept, project FROM personnel WHERE name=%s AND (leave_date IS NULL OR leave_date='') LIMIT 1", (new_assignee,))
+            row = cur.fetchone()
+            if row:
+                new_phone = new_phone or (row.get('phone') or '')
+                new_dept = new_dept or (row.get('dept') or '')
+                new_project = new_project or (row.get('project') or '')
+
+        updates.append('assignee=%s'); params.append(new_assignee)
+        updates.append('assignee_id=%s'); params.append(new_assignee_id)
+        updates.append('assignee_phone=%s'); params.append(new_phone)
+        updates.append('dept=%s'); params.append(new_dept)
+        updates.append('project=%s'); params.append(new_project)
+
+    if not updates:
+        cur.close(); conn.close()
+        return jsonify({'error': '没有要更新的字段'}), 400
+
+    updates.append('updated_at=NOW()')
+    params.append(task_id)
+    sql = f"UPDATE tasks SET {', '.join(updates)} WHERE id=%s"
+
+    try:
+        cur.execute(sql, params)
+        # 添加评论记录责任人变更
+        if 'assignee' in data or 'assignee_id' in data:
+            cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+                VALUES (%s, %s, %s, 'comment')""",
+                (task_id, '系统', f"管理员将责任人修改为 {data.get('assignee', task['assignee'])}"))
+        conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close(); conn.close()
+
+@app.route('/api/tasks/<int:task_id>', methods=['DELETE'])
+def delete_task(task_id):
+    """删除任务（仅超管）— 级联删除 comments 和 reviews"""
+    user_phone = request.headers.get('X-User-Phone', '')
+    if user_phone != '18184005669':
+        return jsonify({'error': '无权限（仅超级管理员）'}), 403
+
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT id, title FROM tasks WHERE id=%s", (task_id,))
+    task = cur.fetchone()
+    if not task:
+        cur.close(); conn.close()
+        return jsonify({'error': '任务不存在'}), 404
+
+    try:
+        # 删除关联数据（先 reviews，再 comments）
+        cur.execute("DELETE FROM task_reviews WHERE task_id=%s", (task_id,))
+        cur.execute("DELETE FROM task_comments WHERE task_id=%s", (task_id,))
+        cur.execute("DELETE FROM tasks WHERE id=%s", (task_id,))
+        conn.commit()
+        return jsonify({'success': True, 'deleted_title': task['title']})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close(); conn.close()
+
+@app.route('/api/tasks/<int:task_id>', methods=['GET'])
+def get_task(task_id):
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
+    task = cur.fetchone()
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+    task['created_at'] = str(task['created_at']) if task['created_at'] else ''
+    task['updated_at'] = str(task['updated_at']) if task['updated_at'] else ''
+    cur.execute("SELECT * FROM task_comments WHERE task_id=%s ORDER BY created_at", (task_id,))
+    comments = cur.fetchall()
+    for c in comments:
+        c['created_at'] = str(c['created_at']) if c['created_at'] else ''
+    cur.execute("SELECT * FROM task_reviews WHERE task_id=%s AND status='pending' ORDER BY created_at DESC LIMIT 1", (task_id,))
+    review = cur.fetchone()
+    if review:
+        review['created_at'] = str(review['created_at']) if review['created_at'] else ''
+    cur.close()
+    conn.close()
+    return jsonify({'task': task, 'comments': comments, 'pending_review': review})
+
+@app.route('/api/tasks/<int:task_id>/progress', methods=['PUT'])
+def update_progress(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    data = request.json
+    progress = data.get('progress', 0)
+    status = '已完成' if progress == 100 else '进行中'
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE tasks SET progress=%s, status=%s, updated_at=NOW() WHERE id=%s", (progress, status, task_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/tasks/<int:task_id>/submit', methods=['POST'])
+def submit_result(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    data = request.json
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""INSERT INTO task_reviews (task_id, submitted_by, requested_progress, file_names)
+        VALUES (%s, %s, %s, %s) RETURNING id""",
+        (task_id, user['name'], data.get('progress',0), data.get('file_names','')))
+    cur.execute("UPDATE tasks SET status='待审核', updated_at=NOW() WHERE id=%s", (task_id,))
+    cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+        VALUES (%s, %s, %s, 'submit')""",
+        (task_id, user['name'], '已上传成果文件，申请进度变更为{}%，请审核'.format(data.get('progress',0))))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/tasks/<int:task_id>/approve', methods=['PUT'])
+def approve_progress(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    # 审核权限：只有超管 + 四个领导班子能审核
+    allowed_reviewers = ['18184005669', '18523176628', '13980885726', '17636671760', '18382194536']
+    if user.get('phone') not in allowed_reviewers:
+        return jsonify({'error': '无审核权限（只有领导班子和管理员可审核）'}), 403
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM task_reviews WHERE task_id=%s AND status='pending' ORDER BY created_at DESC LIMIT 1", (task_id,))
+    review = cur.fetchone()
+    if not review:
+        return jsonify({'error': '无待审核记录'}), 400
+    progress = review['requested_progress']
+    status = '已完成' if progress == 100 else '进行中'
+    cur.execute("UPDATE task_reviews SET status='approved', reviewer=%s, reviewed_at=NOW() WHERE id=%s", (user['name'], review['id']))
+    cur.execute("UPDATE tasks SET progress=%s, status=%s, updated_at=NOW() WHERE id=%s", (progress, status, task_id))
+    cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+        VALUES (%s, %s, %s, 'approve')""",
+        (task_id, user['name'], '审核通过，进度更新为{}%'.format(progress)))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/tasks/<int:task_id>/reject', methods=['PUT'])
+def reject_progress(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    allowed_reviewers = ['18184005669', '18523176628', '13980885726', '17636671760', '18382194536']
+    if user.get('phone') not in allowed_reviewers:
+        return jsonify({'error': '无审核权限（只有领导班子和管理员可审核）'}), 403
+    data = request.json
+    reason = data.get('reason', '成果不符合要求')
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE task_reviews SET status='rejected', reviewer=%s, reject_reason=%s, reviewed_at=NOW() WHERE task_id=%s AND status='pending'", (user['name'], reason, task_id))
+    cur.execute("UPDATE tasks SET status='进行中', updated_at=NOW() WHERE id=%s", (task_id,))
+    cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+        VALUES (%s, %s, %s, 'reject')""",
+        (task_id, user['name'], '审核驳回：{}'.format(reason)))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/tasks/<int:task_id>/comment', methods=['POST'])
+def add_comment(task_id):
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    data = request.json
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""INSERT INTO task_comments (task_id, user_name, content, comment_type)
+        VALUES (%s, %s, %s, %s)""",
+        (task_id, user['name'], data.get('content',''), data.get('type','comment')))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'success': True})
