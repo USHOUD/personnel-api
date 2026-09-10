@@ -1284,16 +1284,17 @@ def export_data():
         TYPE_CONFIG = {
             'all': {
                 'filename': '安装公司全部人员花名册.xlsx',
-                'sheet_title': '全部人员名单',
+                'sheet_title': '总表',
                 'headers': ['序号', '姓名', '性别', '学历', '毕业学校', '专业', '职务/职称', '所属项目', '入职时间', '工龄', '证书', '工作经历', '联系方式', '用工形式'],
-                'need_group': False
+                'need_group': True,
+                'multi_sheet': True
             },
             'huamingce': {
                 'filename': '安装公司人员花名册.xlsx',
                 'sheet_title': '总表',
                 'headers': ['序号', '姓名', '性别', '学历', '毕业学校', '专业', '职务/职称', '所属项目', '入职时间', '工龄', '证书', '工作经历', '联系方式', '用工形式'],
                 'need_group': True,
-                'multi_sheet': True  # 标记多sheet导出
+                'multi_sheet': True
             },
             'regular': {
                 'filename': '安装公司正式职工花名册.xlsx',
