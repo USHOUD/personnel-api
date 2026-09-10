@@ -1318,14 +1318,14 @@ def export_data():
             'project': {
                 'filename': '安装公司按项目分组花名册.xlsx',
                 'sheet_title': '按项目分组名单',
-                'headers': ['序号', 'ID', '姓名', '性别', '岗位', '部门', '项目', '类别', '工资', '状态'],
+                'headers': ['序号', '姓名', '性别', '岗位', '部门', '项目', '类别', '状态'],
                 'need_group': True,
                 'group_by': 'project'
             },
             'dept': {
                 'filename': '安装公司按部门分组花名册.xlsx',
                 'sheet_title': '按部门分组名单',
-                'headers': ['序号', 'ID', '姓名', '性别', '岗位', '部门', '项目', '类别', '工资', '状态'],
+                'headers': ['序号', '姓名', '性别', '岗位', '部门', '项目', '类别', '状态'],
                 'need_group': True,
                 'group_by': 'dept'
             }
@@ -1424,14 +1424,12 @@ def export_data():
             elif export_type in ('project', 'dept'):
                 return [
                     idx + 1,
-                    p['id'],
                     p['name'],
                     p.get('gender', ''),
                     p.get('position', ''),
                     dept,
                     p.get('project', ''),
                     p.get('category', ''),
-                    float(p['salary']) if p.get('salary') else 0,
                     p.get('status', '')
                 ]
 
