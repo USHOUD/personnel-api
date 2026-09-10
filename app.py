@@ -143,7 +143,10 @@ def mask_person_data(p, is_self=False, is_admin=False):
         'phone': p.get('phone', '') or '',
         'category': p.get('category', ''),
         'status': p.get('status', '') or '在岗',
-        'is_external': bool(p.get('is_external', False))
+        'is_external': bool(p.get('is_external', False)),
+        'edu': p.get('edu', '') or '',
+        'school': p.get('school', '') or '',
+        'major': p.get('major', '') or ''
     }
 
     # 管理员或本人看完整信息
