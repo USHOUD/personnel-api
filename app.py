@@ -1629,12 +1629,25 @@ def export_data():
             thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
             styles = (header_font, header_fill, data_font, dept_fill, leader_fill, center_align, left_align, thin_border)
 
+            # 花名册项目顺序
+            project_order = [
+                '凤凰山', '大足站', '天府站', '崇州片区', '川南片区', '康定站',
+                '成达万', '成都北站', '林芝', '毕节', '红星路', '荣县EPC',
+                '西南交大片区', '贵州片区', '遂宁站', '重庆区域', '马厂坝'
+            ]
+
+            # 按花名册顺序排序项目的函数
+            def get_project_order(proj):
+                if proj in project_order:
+                    return project_order.index(proj)
+                return 999  # 未知项目排最后
+
             # 总表
             all_groups = {}
             for dept in backend_dept_order:
                 if dept in backend_groups:
                     all_groups[dept] = backend_groups[dept]
-            for proj in sorted(project_groups.keys()):
+            for proj in sorted(project_groups.keys(), key=get_project_order):
                 all_groups[proj] = project_groups[proj]
 
             write_sheet(ws, '总表', all_groups, list(all_groups.keys()), headers, styles)
@@ -1645,38 +1658,40 @@ def export_data():
 
             # 项目部sheet
             ws_project = wb.create_sheet()
-            write_sheet(ws_project, '项目部', project_groups, sorted(project_groups.keys()), headers, styles)
+            write_sheet(ws_project, '项目部', project_groups, sorted(project_groups.keys(), key=get_project_order), headers, styles)
 
-            # 正式职工表
+            # 正式职工表（只包含正式职工）
             ws_formal = wb.create_sheet()
             formal_groups = {}
             formal_order = []
             for dept in backend_dept_order:
-                dept_formal = [p for p in backend_groups.get(dept, []) if '正式' in str(p.get('category', ''))]
+                dept_formal = [p for p in backend_groups.get(dept, []) if p.get('category') == '正式职工']
                 if dept_formal:
                     formal_groups[dept] = dept_formal
                     formal_order.append(dept)
-            for proj in sorted(project_groups.keys()):
-                proj_formal = [p for p in project_groups[proj] if '正式' in str(p.get('category', ''))]
-                if proj_formal:
-                    formal_groups[proj] = proj_formal
-                    formal_order.append(proj)
+            for proj in project_order:
+                if proj in project_groups:
+                    proj_formal = [p for p in project_groups[proj] if p.get('category') == '正式职工']
+                    if proj_formal:
+                        formal_groups[proj] = proj_formal
+                        formal_order.append(proj)
             write_sheet(ws_formal, '正式职工表', formal_groups, formal_order, headers, styles)
 
-            # 外包人员表
+            # 外包人员表（只包含C1和C2，不包括"外包"）
             ws_outsource = wb.create_sheet()
             outsource_groups = {}
             outsource_order = []
             for dept in backend_dept_order:
-                dept_out = [p for p in backend_groups.get(dept, []) if '正式' not in str(p.get('category', ''))]
+                dept_out = [p for p in backend_groups.get(dept, []) if p.get('category') in ('C1', 'C2')]
                 if dept_out:
                     outsource_groups[dept] = dept_out
                     outsource_order.append(dept)
-            for proj in sorted(project_groups.keys()):
-                proj_out = [p for p in project_groups[proj] if '正式' not in str(p.get('category', ''))]
-                if proj_out:
-                    outsource_groups[proj] = proj_out
-                    outsource_order.append(proj)
+            for proj in project_order:
+                if proj in project_groups:
+                    proj_out = [p for p in project_groups[proj] if p.get('category') in ('C1', 'C2')]
+                    if proj_out:
+                        outsource_groups[proj] = proj_out
+                        outsource_order.append(proj)
             write_sheet(ws_outsource, '外包人员表', outsource_groups, outsource_order, headers, styles)
 
         elif not config.get('need_group'):
@@ -1691,7 +1706,23 @@ def export_data():
 
         else:
             group_key = config['group_by']
-            people_sorted = sorted(people, key=lambda x: x.get(group_key, '') or '未分组')
+            
+            # 按项目分组时只包含项目部人员，按后台分组时只包含后台人员
+            if group_key == 'project':
+                filtered_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配']]
+            elif group_key == 'dept':
+                filtered_people = [p for p in people if (p.get('project') or '') in ['后台', '未分配']]
+            else:
+                filtered_people = people
+            
+            # 排序函数
+            def sort_key_group(p):
+                val = p.get(group_key, '') or '未分组'
+                if group_key == 'project':
+                    return (get_project_order(val), val)
+                return val
+            
+            people_sorted = sorted(filtered_people, key=sort_key_group)
 
             group_idx = 1
             for group_name, group_members in groupby(people_sorted,
