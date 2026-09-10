@@ -1491,6 +1491,14 @@ def export_data():
                     return '预算中心'
                 else:
                     return '其他后台'
+            # 项目名标准化映射
+            project_name_map = {
+                '康定站项目': '康定站',
+                '红星路项目': '红星路',
+                '西南交大': '西南交大片区',
+                '重庆区域项目': '重庆区域',
+                '荣县EPC项目': '荣县EPC',
+            }
 
             # 分离后台和项目部
             backend_people = [p for p in people if (p.get('project') or '') in ['后台', '未分配']]
@@ -1504,10 +1512,11 @@ def export_data():
                     backend_groups[dept] = []
                 backend_groups[dept].append(p)
 
-            # 项目部按项目分组
+            # 项目部按项目分组（标准化项目名）
             project_groups = {}
             for p in project_people:
                 proj = p.get('project') or '未分配'
+                proj = project_name_map.get(proj, proj)  # 标准化项目名
                 if proj not in project_groups:
                     project_groups[proj] = []
                 project_groups[proj].append(p)
@@ -1642,22 +1651,22 @@ def export_data():
                     return project_order.index(proj)
                 return 999
 
-            # 正式职工
+            # 正式职工（category包含"正式"）
             formal_groups = {}
             formal_order = []
             for dept in backend_dept_order:
-                dept_formal = [p for p in backend_groups.get(dept, []) if p.get('category') == '正式职工']
+                dept_formal = [p for p in backend_groups.get(dept, []) if '正式' in str(p.get('category', ''))]
                 if dept_formal:
                     formal_groups[dept] = dept_formal
                     formal_order.append(dept)
             for proj in project_order:
                 if proj in project_groups:
-                    proj_formal = [p for p in project_groups[proj] if p.get('category') == '正式职工']
+                    proj_formal = [p for p in project_groups[proj] if '正式' in str(p.get('category', ''))]
                     if proj_formal:
                         formal_groups[proj] = proj_formal
                         formal_order.append(proj)
 
-            # 外包人员（C1+C2）
+            # 外包人员（C1+C2，不包括"正式"和"外包"）
             outsource_groups = {}
             outsource_order = []
             for dept in backend_dept_order:
@@ -1770,10 +1779,11 @@ def export_data():
                     backend_groups[dept] = []
                 backend_groups[dept].append(p)
 
-            # 项目部按项目分组
+            # 项目部按项目分组（标准化项目名）
             project_groups = {}
             for p in project_people:
                 proj = p.get('project') or '未分配'
+                proj = project_name_map.get(proj, proj)  # 标准化项目名
                 if proj not in project_groups:
                     project_groups[proj] = []
                 project_groups[proj].append(p)
