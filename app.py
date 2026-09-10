@@ -1745,15 +1745,16 @@ def export_data():
                 group_idx = 1
 
         # ---------- 9. 自动列宽（中文按2字符计算） ----------
+        from openpyxl.utils import get_column_letter
         for col in range(1, len(headers) + 1):
             max_len = len(str(headers[col - 1]))
             for row in range(1, current_row):
-                val = ws.cell(row=row, column=col).value
-                if val is not None:
-                    val_str = str(val)
+                cell = ws.cell(row=row, column=col)
+                if hasattr(cell, 'value') and cell.value is not None:
+                    val_str = str(cell.value)
                     display_len = sum(2 if ord(c) > 127 else 1 for c in val_str)
                     max_len = max(max_len, display_len)
-            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = min(max_len + 3, 35)
+            ws.column_dimensions[get_column_letter(col)].width = min(max_len + 3, 35)
 
         ws.row_dimensions[1].height = 28
         for row in range(2, current_row):
