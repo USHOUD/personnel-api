@@ -159,7 +159,10 @@ def mask_person_data(p, is_self=False, is_admin=False):
             'salary': float(p['salary']) if p.get('salary') else None,
             'status_detail': p.get('status_detail', '') or '',
             'hire_date': p.get('hire_date', '') or '',
-            'leave_date': p.get('leave_date', '') or ''
+            'leave_date': p.get('leave_date', '') or '',
+            'school': p.get('school', '') or '',
+            'major': p.get('major', '') or '',
+            'remark': p.get('remark', '') or ''
         }
 
     # 普通用户看别人：基础字段
