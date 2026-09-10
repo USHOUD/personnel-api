@@ -1807,20 +1807,18 @@ def export_data():
         else:
             group_key = config['group_by']
             
-            # 按项目分组时只包含项目部人员，按后台分组时包含后台人员+预算/供应链/其他
+            # 按项目分组时只包含项目部人员，按后台分组时包含后台人员+预算中心/供应链中心等
             if group_key == 'project':
                 filtered_people = [p for p in people if (p.get('project') or '') not in ['后台', '未分配']]
             elif group_key == 'dept':
-                # 后台人员 + 预算/供应链/其他人员
+                # 后台人员 + 预算中心/供应链中心等后台部门人员
                 def is_backend_or_support(p):
                     project = p.get('project') or ''
-                    position = str(p.get('position') or '')
-                    dept = str(p.get('dept') or '')
                     # 后台人员
                     if project in ['后台', '未分配']:
                         return True
-                    # 预算/供应链/其他人员
-                    if any(k in position or k in dept for k in ['预算', '供应链', '其他']):
+                    # 预算中心/供应链中心等后台部门
+                    if project in ['预算中心', '供应链中心']:
                         return True
                     return False
                 filtered_people = [p for p in people if is_backend_or_support(p)]
